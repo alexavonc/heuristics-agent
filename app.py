@@ -3,7 +3,7 @@ import uuid
 import json
 import httpx
 import anthropic
-from flask import Flask, request, Response, jsonify
+from flask import Flask, request, Response, jsonify, send_from_directory
 from flask_cors import CORS
 
 from analyze import (
@@ -23,6 +23,12 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
+
+
+# ── Frontend ──────────────────────────────────────────────────────
+@app.route("/")
+def index():
+    return send_from_directory("static", "index.html")
 
 
 # ── Health ────────────────────────────────────────────────────────

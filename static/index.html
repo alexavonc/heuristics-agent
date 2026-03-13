@@ -1,0 +1,575 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Heuristics Agent</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', sans-serif; background: #f8fafc; color: #0f172a; min-height: 100vh; }
+
+    /* Layout */
+    .page { max-width: 760px; margin: 0 auto; padding: 3rem 1.5rem 6rem; }
+
+    /* Header */
+    .header { margin-bottom: 2.5rem; }
+    .header-badge { display: inline-flex; align-items: center; gap: .4rem; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 9999px; padding: .25rem .75rem; font-size: .75rem; font-weight: 500; color: #64748b; margin-bottom: 1rem; }
+    .header h1 { font-size: 1.875rem; font-weight: 700; color: #0f172a; letter-spacing: -.025em; }
+    .header p { font-size: .9375rem; color: #64748b; margin-top: .4rem; }
+
+    /* Card */
+    .card { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 1.5rem; margin-bottom: 1rem; }
+    .card-title { font-size: .875rem; font-weight: 600; color: #0f172a; margin-bottom: 1.25rem; display: flex; align-items: center; gap: .5rem; }
+    .card-title svg { color: #64748b; }
+
+    /* Mode tabs */
+    .mode-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: .5rem; margin-bottom: 1.5rem; }
+    .mode-tab { padding: .625rem .75rem; border: 1.5px solid #e2e8f0; border-radius: 8px; background: #fff; font-size: .8125rem; font-weight: 500; color: #64748b; cursor: pointer; text-align: center; transition: all .15s; line-height: 1.4; }
+    .mode-tab:hover { border-color: #cbd5e1; color: #0f172a; }
+    .mode-tab.active { border-color: #0f172a; background: #0f172a; color: #fff; }
+    .mode-tab .tab-icon { font-size: 1rem; display: block; margin-bottom: .2rem; }
+
+    /* Form elements */
+    label { display: block; font-size: .8125rem; font-weight: 500; color: #374151; margin-bottom: .375rem; }
+    .hint { font-size: .75rem; color: #94a3b8; margin-top: .25rem; }
+    input[type="text"], input[type="url"] {
+      width: 100%; padding: .5rem .75rem; border: 1px solid #e2e8f0; border-radius: 8px;
+      font-size: .875rem; font-family: inherit; color: #0f172a; background: #fff;
+      transition: border-color .15s; outline: none;
+    }
+    input[type="text"]:focus, input[type="url"]:focus { border-color: #0f172a; box-shadow: 0 0 0 3px rgba(15,23,42,.06); }
+    select {
+      width: 100%; padding: .5rem .75rem; border: 1px solid #e2e8f0; border-radius: 8px;
+      font-size: .875rem; font-family: inherit; color: #0f172a; background: #fff;
+      outline: none; cursor: pointer;
+    }
+    .form-row { margin-bottom: 1rem; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .75rem; }
+
+    /* Upload zone */
+    .upload-zone {
+      border: 1.5px dashed #e2e8f0; border-radius: 8px; padding: 1.5rem;
+      text-align: center; cursor: pointer; transition: all .15s; background: #fafafa;
+    }
+    .upload-zone:hover { border-color: #94a3b8; background: #f8fafc; }
+    .upload-zone.has-file { border-color: #22c55e; background: #f0fdf4; }
+    .upload-zone input { display: none; }
+    .upload-icon { font-size: 1.5rem; margin-bottom: .5rem; }
+    .upload-label { font-size: .8125rem; font-weight: 500; color: #374151; }
+    .upload-hint { font-size: .75rem; color: #94a3b8; margin-top: .2rem; }
+    .upload-filename { font-size: .8125rem; color: #16a34a; font-weight: 500; margin-top: .25rem; }
+
+    /* Steps */
+    .steps-list { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .75rem; }
+    .step-item { border: 1px solid #e2e8f0; border-radius: 8px; padding: .875rem; background: #fafafa; }
+    .step-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .75rem; }
+    .step-num { font-size: .75rem; font-weight: 600; color: #64748b; background: #e2e8f0; border-radius: 9999px; padding: .15rem .6rem; }
+    .step-remove { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 1.1rem; line-height: 1; padding: .1rem .3rem; border-radius: 4px; }
+    .step-remove:hover { background: #fee2e2; color: #ef4444; }
+    .step-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
+    .step-fields .full { grid-column: 1 / -1; }
+    .add-step-btn {
+      width: 100%; padding: .5rem; border: 1.5px dashed #e2e8f0; border-radius: 8px;
+      background: none; font-size: .8125rem; font-weight: 500; color: #64748b;
+      cursor: pointer; transition: all .15s; font-family: inherit;
+    }
+    .add-step-btn:hover { border-color: #94a3b8; color: #374151; background: #f8fafc; }
+
+    /* Screenshot journey list */
+    .screenshot-list { display: flex; flex-direction: column; gap: .5rem; margin-bottom: .75rem; }
+    .screenshot-item { display: flex; align-items: center; gap: .75rem; border: 1px solid #e2e8f0; border-radius: 8px; padding: .625rem .875rem; background: #fafafa; }
+    .screenshot-item .ss-num { font-size: .75rem; font-weight: 600; color: #64748b; background: #e2e8f0; border-radius: 9999px; padding: .15rem .55rem; flex-shrink: 0; }
+    .screenshot-item .ss-name { font-size: .8125rem; color: #374151; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .screenshot-item .ss-remove { background: none; border: none; color: #94a3b8; cursor: pointer; font-size: 1.1rem; padding: .1rem .3rem; border-radius: 4px; }
+    .screenshot-item .ss-remove:hover { background: #fee2e2; color: #ef4444; }
+
+    /* Separator */
+    .sep { height: 1px; background: #f1f5f9; margin: 1.25rem 0; }
+
+    /* Buttons */
+    .btn-primary {
+      display: inline-flex; align-items: center; justify-content: center; gap: .5rem;
+      padding: .625rem 1.25rem; background: #0f172a; color: #fff; border: none;
+      border-radius: 8px; font-size: .875rem; font-weight: 600; cursor: pointer;
+      font-family: inherit; transition: background .15s; width: 100%;
+    }
+    .btn-primary:hover { background: #1e293b; }
+    .btn-primary:disabled { background: #94a3b8; cursor: not-allowed; }
+    .btn-secondary {
+      display: inline-flex; align-items: center; gap: .4rem;
+      padding: .5rem 1rem; background: #fff; color: #374151;
+      border: 1px solid #e2e8f0; border-radius: 8px; font-size: .8125rem;
+      font-weight: 500; cursor: pointer; font-family: inherit; transition: all .15s;
+    }
+    .btn-secondary:hover { border-color: #cbd5e1; background: #f8fafc; }
+
+    /* Loading */
+    .loading-card { display: none; }
+    .loading-card.show { display: block; }
+    .loading-inner { display: flex; flex-direction: column; align-items: center; padding: 2.5rem 1.5rem; }
+    .spinner { width: 36px; height: 36px; border: 3px solid #e2e8f0; border-top-color: #0f172a; border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 1rem; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .loading-title { font-size: .9375rem; font-weight: 600; color: #0f172a; margin-bottom: .25rem; }
+    .loading-sub { font-size: .8125rem; color: #64748b; text-align: center; }
+    .loading-steps { margin-top: 1.25rem; display: flex; flex-direction: column; gap: .4rem; width: 100%; max-width: 320px; }
+    .loading-step { display: flex; align-items: center; gap: .6rem; font-size: .8rem; color: #94a3b8; }
+    .loading-step.done { color: #16a34a; }
+    .loading-step.active { color: #0f172a; font-weight: 500; }
+    .ls-dot { width: 6px; height: 6px; border-radius: 50%; background: #e2e8f0; flex-shrink: 0; }
+    .loading-step.done .ls-dot { background: #22c55e; }
+    .loading-step.active .ls-dot { background: #0f172a; }
+
+    /* Report viewer */
+    .report-card { display: none; }
+    .report-card.show { display: block; }
+    .report-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: .5rem; }
+    .report-scores { display: flex; gap: .75rem; }
+    .score-chip { display: flex; align-items: center; gap: .35rem; padding: .3rem .7rem; border-radius: 9999px; font-size: .78rem; font-weight: 600; background: #f1f5f9; color: #374151; border: 1px solid #e2e8f0; }
+    .report-iframe { width: 100%; height: 800px; border: 1px solid #e2e8f0; border-radius: 8px; }
+
+    /* Error */
+    .error-banner { display: none; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: .75rem 1rem; font-size: .875rem; color: #dc2626; margin-bottom: 1rem; }
+    .error-banner.show { display: block; }
+
+    /* Sub-mode toggle (for screenshots) */
+    .sub-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: .375rem; margin-bottom: 1.25rem; }
+    .sub-btn { padding: .5rem; border: 1.5px solid #e2e8f0; border-radius: 7px; background: #fff; font-size: .8rem; font-weight: 500; color: #64748b; cursor: pointer; text-align: center; transition: all .15s; font-family: inherit; }
+    .sub-btn.active { border-color: #0f172a; background: #f8fafc; color: #0f172a; }
+  </style>
+</head>
+<body>
+<div class="page">
+
+  <!-- Header -->
+  <div class="header">
+    <div class="header-badge">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+      UX Evaluation
+    </div>
+    <h1>Heuristics Agent</h1>
+    <p>Nielsen heuristic evaluation for any web page or user journey</p>
+  </div>
+
+  <!-- Error -->
+  <div class="error-banner" id="error-banner"></div>
+
+  <!-- Main form card -->
+  <div class="card" id="form-card">
+    <!-- Mode tabs -->
+    <div class="mode-tabs">
+      <button class="mode-tab active" onclick="setMode('url')" id="tab-url">
+        <span class="tab-icon">🔗</span>Single Page
+      </button>
+      <button class="mode-tab" onclick="setMode('journey')" id="tab-journey">
+        <span class="tab-icon">🗺️</span>Journey
+      </button>
+      <button class="mode-tab" onclick="setMode('screenshots')" id="tab-screenshots">
+        <span class="tab-icon">🖼️</span>Screenshots
+      </button>
+    </div>
+
+    <!-- ── Mode: Single URL ── -->
+    <div id="mode-url">
+      <div class="form-row">
+        <label>Page URL</label>
+        <input type="url" id="url-input" placeholder="https://yoursite.com" />
+        <p class="hint">We'll evaluate both desktop (1440px) and mobile (390px) viewports</p>
+      </div>
+    </div>
+
+    <!-- ── Mode: Journey ── -->
+    <div id="mode-journey" style="display:none">
+      <div class="form-row">
+        <label>Starting URL</label>
+        <input type="url" id="journey-url-input" placeholder="https://yoursite.com" />
+      </div>
+      <div class="sep"></div>
+      <div class="card-title">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+        Journey Steps
+      </div>
+      <div class="steps-list" id="steps-list"></div>
+      <button class="add-step-btn" onclick="addStep()">+ Add Step</button>
+    </div>
+
+    <!-- ── Mode: Screenshots ── -->
+    <div id="mode-screenshots" style="display:none">
+      <div class="sub-toggle">
+        <button class="sub-btn active" onclick="setScreenshotMode('single')" id="ss-sub-single">Single Page</button>
+        <button class="sub-btn" onclick="setScreenshotMode('journey')" id="ss-sub-journey">Journey</button>
+      </div>
+
+      <!-- Single screenshot -->
+      <div id="ss-single">
+        <div class="form-grid">
+          <div class="form-row">
+            <label>Desktop Screenshot</label>
+            <div class="upload-zone" onclick="document.getElementById('desktop-file').click()" id="desktop-zone">
+              <input type="file" id="desktop-file" accept="image/*" onchange="handleFile(this,'desktop-zone','desktop-name')" />
+              <div class="upload-icon">🖥️</div>
+              <div class="upload-label">Click to upload</div>
+              <div class="upload-hint">PNG, JPG, WebP</div>
+              <div class="upload-filename" id="desktop-name"></div>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>Mobile Screenshot <span style="color:#94a3b8;font-weight:400">(optional)</span></label>
+            <div class="upload-zone" onclick="document.getElementById('mobile-file').click()" id="mobile-zone">
+              <input type="file" id="mobile-file" accept="image/*" onchange="handleFile(this,'mobile-zone','mobile-name')" />
+              <div class="upload-icon">📱</div>
+              <div class="upload-label">Click to upload</div>
+              <div class="upload-hint">PNG, JPG, WebP</div>
+              <div class="upload-filename" id="mobile-name"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Journey screenshots -->
+      <div id="ss-journey" style="display:none">
+        <label style="margin-bottom:.75rem">Step Screenshots <span style="color:#94a3b8;font-weight:400">(in order)</span></label>
+        <div class="screenshot-list" id="ss-journey-list"></div>
+        <div class="upload-zone" onclick="document.getElementById('ss-journey-file').click()" style="margin-bottom:0">
+          <input type="file" id="ss-journey-file" accept="image/*" multiple onchange="handleJourneyFiles(this)" />
+          <div class="upload-icon">📂</div>
+          <div class="upload-label">Click to add screenshots</div>
+          <div class="upload-hint">Select multiple files at once or add one by one</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="sep"></div>
+    <button class="btn-primary" id="submit-btn" onclick="runAnalysis()">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+      Run Analysis
+    </button>
+  </div>
+
+  <!-- Loading -->
+  <div class="card loading-card" id="loading-card">
+    <div class="loading-inner">
+      <div class="spinner"></div>
+      <div class="loading-title" id="loading-title">Analysing your page…</div>
+      <div class="loading-sub">This takes 30–90 seconds depending on the complexity</div>
+      <div class="loading-steps" id="loading-steps"></div>
+    </div>
+  </div>
+
+  <!-- Report -->
+  <div class="report-card" id="report-card">
+    <div class="report-header">
+      <div class="card-title" style="margin:0">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Evaluation Complete
+      </div>
+      <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
+        <div class="report-scores" id="report-scores"></div>
+        <button class="btn-secondary" onclick="openFullReport()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+          Open full report
+        </button>
+        <button class="btn-secondary" onclick="resetForm()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
+          New analysis
+        </button>
+      </div>
+    </div>
+    <iframe class="report-iframe" id="report-iframe" src="about:blank"></iframe>
+  </div>
+
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────
+var _mode = 'url';
+var _ssMode = 'single';
+var _steps = [];
+var _ssJourneyFiles = [];
+var _currentReportId = null;
+var _currentReportUrl = null;
+
+// ── Mode switching ─────────────────────────────────────
+function setMode(m) {
+  _mode = m;
+  ['url','journey','screenshots'].forEach(function(x) {
+    document.getElementById('mode-'+x).style.display = x === m ? '' : 'none';
+    document.getElementById('tab-'+x).classList.toggle('active', x === m);
+  });
+}
+
+function setScreenshotMode(m) {
+  _ssMode = m;
+  document.getElementById('ss-single').style.display = m === 'single' ? '' : 'none';
+  document.getElementById('ss-journey').style.display = m === 'journey' ? '' : 'none';
+  document.getElementById('ss-sub-single').classList.toggle('active', m === 'single');
+  document.getElementById('ss-sub-journey').classList.toggle('active', m === 'journey');
+}
+
+// ── File upload ────────────────────────────────────────
+function handleFile(input, zoneId, nameId) {
+  var zone = document.getElementById(zoneId);
+  var nameEl = document.getElementById(nameId);
+  if (input.files && input.files[0]) {
+    zone.classList.add('has-file');
+    nameEl.textContent = input.files[0].name;
+  }
+}
+
+function handleJourneyFiles(input) {
+  if (!input.files) return;
+  Array.from(input.files).forEach(function(f) { _ssJourneyFiles.push(f); });
+  renderJourneyFileList();
+  input.value = '';
+}
+
+function renderJourneyFileList() {
+  var list = document.getElementById('ss-journey-list');
+  list.innerHTML = '';
+  _ssJourneyFiles.forEach(function(f, i) {
+    var item = document.createElement('div');
+    item.className = 'screenshot-item';
+    item.innerHTML = '<span class="ss-num">'+i+'</span><span class="ss-name">'+f.name+'</span>'
+      +'<button class="ss-remove" onclick="removeJourneyFile('+i+')">×</button>';
+    list.appendChild(item);
+  });
+}
+
+function removeJourneyFile(i) {
+  _ssJourneyFiles.splice(i, 1);
+  renderJourneyFileList();
+}
+
+// ── Journey steps ──────────────────────────────────────
+var ACTION_FIELDS = {
+  click_text:     [{key:'value', label:'Text to click', ph:'Sign Up'}],
+  click_selector: [{key:'value', label:'CSS selector', ph:'.btn-primary'}],
+  fill:           [{key:'selector', label:'CSS selector', ph:'#email'}, {key:'value', label:'Value to type', ph:'test@example.com'}],
+  fill_label:     [{key:'label_val', label:'Field label', ph:'Email address'}, {key:'value', label:'Value to type', ph:'test@example.com'}],
+  navigate:       [{key:'url', label:'URL', ph:'https://...'}],
+  scroll:         [{key:'amount', label:'Pixels', ph:'500'}],
+  wait:           [{key:'ms', label:'Milliseconds', ph:'2000'}],
+  hover:          [{key:'value', label:'CSS selector', ph:'.menu-item'}],
+  press:          [{key:'key', label:'Key', ph:'Enter'}],
+};
+
+function addStep() {
+  _steps.push({action:'click_text', value:'', label:''});
+  renderSteps();
+}
+
+function removeStep(i) {
+  _steps.splice(i, 1);
+  renderSteps();
+}
+
+function updateStep(i, key, val) {
+  _steps[i][key] = val;
+  if (key === 'action') renderSteps();
+}
+
+function renderSteps() {
+  var list = document.getElementById('steps-list');
+  list.innerHTML = '';
+  _steps.forEach(function(step, i) {
+    var fields = ACTION_FIELDS[step.action] || [];
+    var fieldsHtml = fields.map(function(f) {
+      var k = f.key === 'label_val' ? 'label_val' : f.key;
+      return '<div><label style="font-size:.75rem">'+f.label+'</label>'
+        +'<input type="text" value="'+(step[k]||'')+'" placeholder="'+f.ph+'" '
+        +'oninput="updateStep('+i+',\''+k+'\',this.value)" /></div>';
+    }).join('');
+
+    var actionOpts = Object.keys(ACTION_FIELDS).map(function(a) {
+      return '<option value="'+a+'"'+(step.action===a?' selected':'')+'>'+a.replace('_',' ')+'</option>';
+    }).join('');
+
+    var div = document.createElement('div');
+    div.className = 'step-item';
+    div.innerHTML = '<div class="step-header">'
+      +'<span class="step-num">Step '+(i+1)+'</span>'
+      +'<button class="step-remove" onclick="removeStep('+i+')">×</button>'
+      +'</div>'
+      +'<div class="step-fields">'
+      +'<div><label style="font-size:.75rem">Action</label>'
+      +'<select onchange="updateStep('+i+',\'action\',this.value)">'+actionOpts+'</select></div>'
+      +'<div><label style="font-size:.75rem">Step label</label>'
+      +'<input type="text" value="'+(step.label||'')+'" placeholder="e.g. Click sign up" oninput="updateStep('+i+',\'label\',this.value)" /></div>'
+      +fieldsHtml
+      +'</div>';
+    list.appendChild(div);
+  });
+}
+
+// ── Loading steps text ─────────────────────────────────
+var LOAD_STEPS_URL = [
+  'Launching browser & loading page',
+  'Capturing desktop & mobile screenshots',
+  'Evaluating against Nielsen heuristics',
+  'Locating issues on the page',
+  'Generating annotated report',
+];
+var LOAD_STEPS_JOURNEY = [
+  'Launching browser & navigating',
+  'Executing journey steps',
+  'Capturing screenshots at each step',
+  'Evaluating full journey with Claude',
+  'Annotating & building report',
+];
+var LOAD_STEPS_SS = [
+  'Processing uploaded screenshots',
+  'Sending to Claude for evaluation',
+  'Parsing issues & locations',
+  'Annotating screenshots',
+  'Building report',
+];
+
+function startLoadingSteps(steps) {
+  var container = document.getElementById('loading-steps');
+  container.innerHTML = steps.map(function(s, i) {
+    return '<div class="loading-step'+(i===0?' active':'')+'" id="lstep-'+i+'">'
+      +'<div class="ls-dot"></div>'+s+'</div>';
+  }).join('');
+  var i = 0;
+  var iv = setInterval(function() {
+    var el = document.getElementById('lstep-'+i);
+    if (el) { el.classList.remove('active'); el.classList.add('done'); }
+    i++;
+    if (i >= steps.length) { clearInterval(iv); return; }
+    var next = document.getElementById('lstep-'+i);
+    if (next) next.classList.add('active');
+  }, 12000);
+  return iv;
+}
+
+// ── Submit ─────────────────────────────────────────────
+async function runAnalysis() {
+  hideError();
+  var btn = document.getElementById('submit-btn');
+
+  if (_mode === 'url') {
+    var url = document.getElementById('url-input').value.trim();
+    if (!url) { showError('Please enter a URL.'); return; }
+    showLoading('Analysing page…', LOAD_STEPS_URL);
+    try {
+      var res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({url: url}),
+      });
+      var data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showReport(data.report_id, data.desktop_score, data.mobile_score);
+    } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
+
+  } else if (_mode === 'journey') {
+    var url = document.getElementById('journey-url-input').value.trim();
+    if (!url) { showError('Please enter a starting URL.'); return; }
+    if (_steps.length === 0) { showError('Please add at least one journey step.'); return; }
+    var steps = _steps.map(function(s) {
+      var obj = {action: s.action, label: s.label || ('Step: '+s.action)};
+      if (s.value)     obj.value    = s.value;
+      if (s.selector)  obj.selector = s.selector;
+      if (s.label_val) obj.label    = s.label_val;
+      if (s.url)       obj.url      = s.url;
+      if (s.amount)    obj.amount   = parseInt(s.amount)||500;
+      if (s.ms)        obj.ms       = parseInt(s.ms)||2000;
+      if (s.key)       obj.key      = s.key;
+      return obj;
+    });
+    showLoading('Analysing journey…', LOAD_STEPS_JOURNEY);
+    try {
+      var res = await fetch('/api/analyze', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({url: url, steps: steps}),
+      });
+      var data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showReport(data.report_id, data.desktop_score, data.mobile_score);
+    } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
+
+  } else if (_mode === 'screenshots') {
+    var fd = new FormData();
+    if (_ssMode === 'single') {
+      var df = document.getElementById('desktop-file').files[0];
+      if (!df) { showError('Please upload a desktop screenshot.'); return; }
+      fd.append('desktop', df);
+      var mf = document.getElementById('mobile-file').files[0];
+      if (mf) fd.append('mobile', mf);
+      fd.append('journey', 'false');
+    } else {
+      if (_ssJourneyFiles.length < 2) { showError('Please add at least 2 step screenshots.'); return; }
+      _ssJourneyFiles.forEach(function(f) { fd.append('steps[]', f); });
+      fd.append('journey', 'true');
+    }
+    showLoading('Processing screenshots…', LOAD_STEPS_SS);
+    try {
+      var res = await fetch('/api/analyze/screenshots', {method:'POST', body:fd});
+      var data = await res.json();
+      if (data.error) throw new Error(data.error);
+      showReport(data.report_id, data.desktop_score, data.mobile_score);
+    } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
+  }
+}
+
+// ── UI helpers ─────────────────────────────────────────
+function showLoading(title, steps) {
+  document.getElementById('form-card').style.display = 'none';
+  document.getElementById('loading-title').textContent = title;
+  document.getElementById('loading-card').classList.add('show');
+  startLoadingSteps(steps);
+}
+
+function hideLoading() {
+  document.getElementById('loading-card').classList.remove('show');
+  document.getElementById('form-card').style.display = '';
+}
+
+function showReport(reportId, desktopScore, mobileScore) {
+  _currentReportId = reportId;
+  _currentReportUrl = '/api/report/' + reportId;
+  document.getElementById('loading-card').classList.remove('show');
+  // Scores
+  var scoresEl = document.getElementById('report-scores');
+  scoresEl.innerHTML = '';
+  function scoreColor(s) {
+    if (!s && s !== 0) return '#64748b';
+    if (s >= 7) return '#16a34a'; if (s >= 5) return '#d97706'; return '#dc2626';
+  }
+  if (desktopScore !== null && desktopScore !== undefined) {
+    scoresEl.innerHTML += '<div class="score-chip"><span style="font-size:.7rem;color:#64748b">🖥</span>'
+      +'<span style="color:'+scoreColor(desktopScore)+'">'+desktopScore.toFixed(1)+'</span><span style="color:#94a3b8;font-weight:400">/10</span></div>';
+  }
+  if (mobileScore !== null && mobileScore !== undefined) {
+    scoresEl.innerHTML += '<div class="score-chip"><span style="font-size:.7rem;color:#64748b">📱</span>'
+      +'<span style="color:'+scoreColor(mobileScore)+'">'+mobileScore.toFixed(1)+'</span><span style="color:#94a3b8;font-weight:400">/10</span></div>';
+  }
+  document.getElementById('report-iframe').src = _currentReportUrl;
+  document.getElementById('report-card').classList.add('show');
+}
+
+function openFullReport() {
+  if (_currentReportUrl) window.open(_currentReportUrl, '_blank');
+}
+
+function resetForm() {
+  document.getElementById('report-card').classList.remove('show');
+  document.getElementById('form-card').style.display = '';
+  document.getElementById('report-iframe').src = 'about:blank';
+  _currentReportId = null;
+}
+
+function showError(msg) {
+  var el = document.getElementById('error-banner');
+  el.textContent = msg;
+  el.classList.add('show');
+  window.scrollTo({top: 0, behavior: 'smooth'});
+}
+
+function hideError() {
+  document.getElementById('error-banner').classList.remove('show');
+}
+</script>
+</body>
+</html>
