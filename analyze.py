@@ -45,12 +45,14 @@ Nielsen's 10 Heuristics for reference:
 10. Help and documentation
 You have been given extracted content from a sales funnel page.
 Evaluate it against these heuristics and produce a clear report.
-For each issue found, provide:
-- Which heuristic is violated (number + name)
-- Where exactly on the page the issue occurs
-- What the specific problem is
-- A concrete recommendation to fix it
-- Severity: Critical / High / Medium / Low
+For each issue found, use EXACTLY this format:
+
+### Issue N: [short title]
+**Heuristic:** #[number] – [name]
+**Problem:** [specific description of the problem]
+**Recommendation:** [concrete actionable fix]
+**Severity:** Critical / High / Medium / Low
+
 Also list any strengths you observe.
 End with an overall score out of 10 and a one-paragraph summary.
 Be specific. Reference the actual text, buttons, and labels you can see.
@@ -94,12 +96,14 @@ Nielsen's 10 Heuristics for reference:
 8. Aesthetic and minimalist design
 9. Help users recognize, diagnose, and recover from errors
 10. Help and documentation
-Evaluate the ENTIRE FLOW end-to-end. For each issue found, provide:
-- Which step(s) it occurs in (e.g. "Step 2 -> Step 3")
-- Which heuristic is violated (number + name)
-- What the specific problem is
-- A concrete recommendation to fix it
-- Severity: Critical / High / Medium / Low
+Evaluate the ENTIRE FLOW end-to-end. For each issue found, use EXACTLY this format:
+
+### Issue N: [short title]
+**Step:** [step number(s)]
+**Heuristic:** #[number] – [name]
+**Problem:** [specific description of the problem]
+**Recommendation:** [concrete actionable fix]
+**Severity:** Critical / High / Medium / Low
 Also evaluate:
 - Flow continuity: does each screen logically follow from the previous?
 - Progress visibility: does the user know where they are in the journey?
