@@ -1152,16 +1152,37 @@ def _single_journey_section(
     step_cards = ""
     for step in steps_data:
         crops = step.get("issue_crops", [])
+        step_locs = step.get("locations", [])
+        has_issues = any(issue_num != -1 for issue_num, *_ in crops)
+
+        # Full annotated screenshot — always shown, clickable to open modal
+        full_img_b64 = base64.b64encode(step["screenshot_bytes"]).decode()
+        modal_issues = json.dumps([
+            {
+                "issue_number": loc["issue_number"],
+                "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
+                "severity":     loc.get("severity", "Medium"),
+                "bbox_pct":     loc.get("bbox_pct"),
+                **issue_details.get(loc["issue_number"], {}),
+            }
+            for loc in step_locs
+        ])
+        modal_data = _html_mod.escape(modal_issues)
+        cursor = "zoom-in" if step_locs else "default"
+        click_handler = f'onclick="_ssOpen(this.src,JSON.parse(this.dataset.issues),\'{vp}\')"' if step_locs else ""
+        full_ss_html = f"""
+        <img src="data:image/png;base64,{full_img_b64}" alt="Step {step['step_num']} screenshot"
+             style="cursor:{cursor};width:100%;display:block;"
+             data-issues="{modal_data}"
+             {click_handler} />"""
+
+        # Issue crops — only shown when there are actual issues (not the "no issues" placeholder)
         crop_imgs = ""
-        for issue_num, short_title, severity, crop_bytes in crops:
-            img_b64 = base64.b64encode(crop_bytes).decode()
-            if issue_num == -1:
-                crop_imgs += f"""
-          <div class="crop-block no-issues-block">
-            <div class="crop-label no-issues-label">No issues found</div>
-            <img src="data:image/png;base64,{img_b64}" alt="Step thumbnail" />
-          </div>"""
-            else:
+        if has_issues:
+            for issue_num, short_title, severity, crop_bytes in crops:
+                if issue_num == -1:
+                    continue
+                img_b64 = base64.b64encode(crop_bytes).decode()
                 hex_color = SEVERITY_HEX.get(severity, "#d97706")
                 issue_data_attr = _html_mod.escape(json.dumps({
                     "issue_number": issue_num,
@@ -1180,25 +1201,9 @@ def _single_journey_section(
                  data-issue="{issue_data_attr}"
                  onclick="_ssCropClick(this.src,JSON.parse(this.dataset.issue),'{vp}')" />
           </div>"""
-        # Full annotated screenshot — clickable to open modal with overlays
-        full_img_b64 = base64.b64encode(step["screenshot_bytes"]).decode()
-        step_locs = step.get("locations", [])
-        modal_issues = json.dumps([
-            {
-                "issue_number": loc["issue_number"],
-                "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
-                "severity":     loc.get("severity", "Medium"),
-                "bbox_pct":     loc.get("bbox_pct"),
-                **issue_details.get(loc["issue_number"], {}),
-            }
-            for loc in step_locs
-        ])
-        modal_data = _html_mod.escape(modal_issues)
-        full_ss_html = f"""
-        <img src="data:image/png;base64,{full_img_b64}" alt="Step {step['step_num']} screenshot"
-             style="cursor:zoom-in;width:100%;display:block;"
-             data-issues="{modal_data}"
-             onclick="_ssOpen(this.src,JSON.parse(this.dataset.issues),'{vp}')" />"""
+        else:
+            crop_imgs = '<div style="padding:.4rem .6rem;font-size:.75rem;color:#94a3b8;">No issues found</div>'
+
         step_cards += f"""
       <div class="step-card">
         <div class="step-header">
@@ -1310,14 +1315,17 @@ def call_claude_screenshot(screenshot_bytes: bytes, viewport_label: str = "deskt
     )
     return response.content[0].text
 
-def call_claude_journey_screenshots(step_images: list[bytes], viewport_label: str = "desktop") -> str:
-    print(f"  Sending {len(step_images)}-step {viewport_label} screenshot journey to Claude ...")
+def call_claude_journey_screenshots(step_images: list[bytes], step_offset: int = 0, viewport_label: str = "desktop") -> str:
+    """Call Claude for a batch of journey screenshots. step_offset shifts the step numbers."""
+    total = len(step_images)
+    print(f"  Sending steps {step_offset}–{step_offset+total-1} ({total} screenshots) to Claude ...")
     client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
     content_blocks: list = [{
         "type": "text",
         "text": (
-            f"I am providing a {len(step_images)}-step user journey ({viewport_label} viewport) "
-            f"as screenshots, in order. Please evaluate the entire flow end-to-end.\n\n"
+            f"I am providing steps {step_offset} to {step_offset+total-1} of a user journey "
+            f"({viewport_label} viewport) as screenshots, in order. "
+            f"Please evaluate this segment against Nielsen's 10 heuristics.\n\n"
         ),
     }]
     for i, img_bytes in enumerate(step_images):
@@ -1326,14 +1334,14 @@ def call_claude_journey_screenshots(step_images: list[bytes], viewport_label: st
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=60, optimize=True)
         img_b64 = base64.standard_b64encode(buf.getvalue()).decode()
-        content_blocks.append({"type": "text", "text": f"--- STEP {i} ---\nScreenshot:"})
+        content_blocks.append({"type": "text", "text": f"--- STEP {step_offset + i} ---\nScreenshot:"})
         content_blocks.append({
             "type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
         })
     content_blocks.append({
         "type": "text",
-        "text": "Please evaluate this complete user journey against Nielsen's 10 heuristics.",
+        "text": "Please evaluate this journey segment against Nielsen's 10 heuristics.",
     })
     with client.messages.stream(
         model="claude-sonnet-4-6",
@@ -1486,18 +1494,49 @@ def analyze_screenshots(
         ),
     }
 
+_JOURNEY_BATCH_SIZE = 15
+
 def analyze_journey_screenshots(
     step_images: list[bytes], api_url: str = None
 ) -> dict:
     """
     Run a journey heuristic evaluation from a list of screenshot bytes (one per step).
-    Returns a dict with keys: html, report_text, locations
+    Automatically batches large journeys (>15 steps) into groups for reliable evaluation.
+    Returns a dict with keys: html, report_text, locations, score
     """
-    full_response = call_claude_journey_screenshots(step_images)
-    report_text, locations = parse_response(full_response)
+    all_locations: list = []
+    report_parts: list[str] = []
+    issue_offset = 0
+
+    for batch_start in range(0, len(step_images), _JOURNEY_BATCH_SIZE):
+        batch = step_images[batch_start:batch_start + _JOURNEY_BATCH_SIZE]
+        full_response = call_claude_journey_screenshots(batch, step_offset=batch_start)
+        report_text, locations = parse_response(full_response)
+        # Offset issue numbers so they don't collide across batches
+        for loc in locations:
+            loc["issue_number"] += issue_offset
+        if locations:
+            issue_offset = max(loc["issue_number"] for loc in locations)
+        all_locations.extend(locations)
+        report_parts.append(report_text)
+
+    # Merge report texts; prepend overall score line for _extract_score to find
+    if len(report_parts) == 1:
+        merged_report = report_parts[0]
+    else:
+        batch_scores = [s for s in (_extract_score(r) for r in report_parts) if s is not None]
+        overall = round(sum(batch_scores) / len(batch_scores), 1) if batch_scores else 5.0
+        sections = []
+        for idx, rpt in enumerate(report_parts):
+            b_start = idx * _JOURNEY_BATCH_SIZE
+            b_end   = min(b_start + _JOURNEY_BATCH_SIZE - 1, len(step_images) - 1)
+            sections.append(f"=== Steps {b_start}–{b_end} ===\n{rpt}")
+        merged_report = f"Overall Score: {overall}/10\n\n" + "\n\n".join(sections)
+
     locs_by_step = defaultdict(list)
-    for loc in locations:
+    for loc in all_locations:
         locs_by_step[loc.get("step_num", 0)].append(loc)
+
     steps_data = []
     for i, img_bytes in enumerate(step_images):
         png = _to_png(img_bytes)
@@ -1511,15 +1550,16 @@ def analyze_journey_screenshots(
             "issue_crops":      crop_to_issue_regions(annotated, found),
             "locations":        step_locs,
         })
+
     html = generate_journey_html(
         "Uploaded Screenshots",
-        steps_data, report_text, locations,
-        steps_data, report_text, locations,
+        steps_data, merged_report, all_locations,
+        steps_data, merged_report, all_locations,
         api_url=api_url,
     )
     return {
         "html":        html,
-        "report_text": report_text,
-        "locations":   locations,
-        "score":       _extract_score(report_text),
+        "report_text": merged_report,
+        "locations":   all_locations,
+        "score":       _extract_score(merged_report),
     }
