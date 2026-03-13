@@ -1157,9 +1157,10 @@ def generate_html(
 def _single_journey_section(
     steps_data: list[dict], report_text: str, locations: list,
     viewport_label: str = "desktop", api_url: str = None,
+    issue_details_override: dict = None,
 ) -> str:
     vp = viewport_label
-    issue_details = _extract_issue_details(report_text)
+    issue_details = issue_details_override if issue_details_override is not None else _extract_issue_details(report_text)
     score_val = _extract_score(report_text) or 0.0
     step_cards = ""
     for step in steps_data:
@@ -1188,34 +1189,7 @@ def _single_journey_section(
              data-issues="{modal_data}"
              {click_handler} />"""
 
-        # Issue crops — only shown when there are actual issues (not the "no issues" placeholder)
-        crop_imgs = ""
-        if has_issues:
-            for issue_num, short_title, severity, crop_bytes in crops:
-                if issue_num == -1:
-                    continue
-                img_b64 = base64.b64encode(crop_bytes).decode()
-                hex_color = SEVERITY_HEX.get(severity, "#d97706")
-                issue_data_attr = _html_mod.escape(json.dumps({
-                    "issue_number": issue_num,
-                    "short_title":  short_title or f"Issue {issue_num}",
-                    "severity":     severity or "Medium",
-                    **issue_details.get(issue_num, {}),
-                }))
-                crop_imgs += f"""
-          <div class="crop-block">
-            <div class="crop-label" style="background:{hex_color}">
-              <span class="crop-badge">#{issue_num}</span>
-              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">{short_title}</span>
-            </div>
-            <img src="data:image/png;base64,{img_b64}" alt="Issue #{issue_num}"
-                 style="cursor:zoom-in;"
-                 data-issue="{issue_data_attr}"
-                 onclick="_ssCropClick(this.src,JSON.parse(this.dataset.issue),'{vp}')" />
-          </div>"""
-        else:
-            crop_imgs = '<div style="padding:.4rem .6rem;font-size:.75rem;color:#94a3b8;">No issues found</div>'
-
+        no_issues_label = '' if has_issues else '<div style="padding:.4rem .6rem;font-size:.75rem;color:#94a3b8;">No issues found</div>'
         step_cards += f"""
       <div class="step-card">
         <div class="step-header">
@@ -1224,7 +1198,7 @@ def _single_journey_section(
           <span class="step-url">{step['url']}</span>
         </div>
         {full_ss_html}
-        <div class="crop-list">{crop_imgs}</div>
+        {no_issues_label}
       </div>"""
     legend_rows = ""
     for loc in locations:
@@ -1271,9 +1245,10 @@ def generate_journey_html(
     desktop_steps: list[dict], desktop_report: str, desktop_locs: list,
     mobile_steps: list[dict],  mobile_report: str,  mobile_locs: list,
     api_url: str = None,
+    issue_details_override: dict = None,
 ) -> str:
-    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", api_url)
-    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  api_url)
+    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", api_url, issue_details_override)
+    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  api_url, issue_details_override)
     return _html_shell(
         title="Journey Heuristic Evaluation Report",
         subtitle=f"Journey starting at {start_url} &nbsp;&middot;&nbsp; {len(desktop_steps)} steps",
@@ -1517,6 +1492,7 @@ def analyze_journey_screenshots(
     Returns a dict with keys: html, report_text, locations, score
     """
     all_locations: list = []
+    all_issue_details: dict = {}
     report_parts: list[str] = []
     issue_offset = 0
 
@@ -1524,9 +1500,13 @@ def analyze_journey_screenshots(
         batch = step_images[batch_start:batch_start + _JOURNEY_BATCH_SIZE]
         full_response = call_claude_journey_screenshots(batch, step_offset=batch_start)
         report_text, locations = parse_response(full_response)
-        # Renumber report text FIRST (before offsetting locations) so numbers stay in sync
+        # Build issue_details for this batch and merge with offset keys
+        batch_details = _extract_issue_details(report_text)
+        for orig_num, detail in batch_details.items():
+            all_issue_details[orig_num + issue_offset] = detail
+        # Renumber report text to keep merged report text consistent
         renumbered_report = _renumber_issues_in_report(report_text, issue_offset)
-        # Offset issue numbers so they don't collide across batches
+        # Offset issue numbers in locations
         for loc in locations:
             loc["issue_number"] += issue_offset
         if locations:
@@ -1570,6 +1550,7 @@ def analyze_journey_screenshots(
         steps_data, merged_report, all_locations,
         steps_data, merged_report, all_locations,
         api_url=api_url,
+        issue_details_override=all_issue_details,
     )
     return {
         "html":        html,
