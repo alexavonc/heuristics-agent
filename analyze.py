@@ -836,6 +836,67 @@ def _list_to_table(text: str, col1: str, col2: str) -> str:
     return (intro + '\n\n' + table).strip() if intro else table.strip()
 
 
+def _synthesize_narrative(strengths_chunks: list[str], summary_chunks: list[str]) -> tuple[str, str]:
+    """Send accumulated Strengths and Summary chunks from multiple batches to Claude
+    for synthesis into integrated, non-repetitive prose.
+    Returns (strengths_text, summary_text).
+    """
+    if not strengths_chunks and not summary_chunks:
+        return "", ""
+
+    parts = []
+    if strengths_chunks:
+        parts.append(
+            "STRENGTHS (extracted from multiple batches — may contain duplicates):\n\n"
+            + "\n\n---\n\n".join(strengths_chunks)
+        )
+    if summary_chunks:
+        parts.append(
+            "SUMMARY (extracted from multiple batches — may be repetitive):\n\n"
+            + "\n\n---\n\n".join(summary_chunks)
+        )
+
+    prompt = """You are editing a UX heuristic evaluation report assembled from multiple \
+batch analyses of a long user journey. The sections below were extracted from each batch \
+separately — synthesise them into integrated, professional prose as if one analyst \
+evaluated the entire journey at once.
+
+Guidelines:
+- Remove all duplicate or near-duplicate observations; merge related points into single insights
+- Never reference "batches", "steps 0–14", or any segment framing
+- Strengths: a clean markdown bullet list (- item), max 8 points, no duplicates
+- Summary: 2–3 cohesive paragraphs covering dominant UX patterns, the most critical \
+failures, and top quick wins across the whole journey
+- Plain markdown only — no section headers in your output
+
+Output using exactly these XML markers:
+<STRENGTHS>
+[bullet list]
+</STRENGTHS>
+<SUMMARY>
+[paragraphs]
+</SUMMARY>
+
+Raw content to synthesise:
+---
+""" + "\n\n===\n\n".join(parts) + "\n---"
+
+    print("  Synthesising narrative sections across batches...")
+    client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=2048,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    text = response.content[0].text
+
+    sm = re.search(r'<STRENGTHS>(.*?)</STRENGTHS>', text, re.DOTALL)
+    pm = re.search(r'<SUMMARY>(.*?)</SUMMARY>',    text, re.DOTALL)
+    strengths = sm.group(1).strip() if sm else "\n\n".join(strengths_chunks)
+    summary   = pm.group(1).strip() if pm else "\n\n".join(summary_chunks)
+    return strengths, summary
+
+
 def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
     """Combine multiple batch reports into one cohesive compiled document.
 
@@ -899,11 +960,25 @@ def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
         if issues_clean:
             accumulated["issues"].append(issues_clean)
 
-        # 4. Remove score line from rest before section extraction
-        rest_no_score = re.sub(r'(?m)^[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*\n?', '', rest).strip()
+        # 4. Remove score line and the rubric-descriptor line that often follows it
+        #    e.g. "Overall Score: 4/10" AND "**Poor** — Significant UX failures…"
+        rest_no_score = re.sub(r'(?m)^[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*\n?', '', rest)
+        rest_no_score = re.sub(
+            r'(?m)^[ \t]*\*{0,2}(?:Near-perfect|Needs Work|Poor|Good|Critical)\*{0,2}'
+            r'[ \t]*[—–-][^\n]*\n?',
+            '', rest_no_score, flags=re.IGNORECASE,
+        ).strip()
 
         # 5. Find section header positions in rest_no_score
         header_matches = list(all_section_pat.finditer(rest_no_score))
+
+        # 5a. Capture any preamble text before the first section header as summary.
+        #     Claude sometimes writes the summary paragraph before "## Strengths".
+        if header_matches:
+            preamble = rest_no_score[:header_matches[0].start()].strip()
+            preamble = re.sub(r'(?m)^---+\s*\n?', '', preamble).strip()
+            if preamble:
+                accumulated["summary"].append(preamble)
 
         for i, m in enumerate(header_matches):
             header_text = m.group(0).strip()
@@ -913,15 +988,53 @@ def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
             content = re.sub(r'(?m)^---+\s*\n?', '', content).strip()
             if not content:
                 continue
+
             # Identify which section this header belongs to
+            section_key = None
             for key, pat in SECTIONS:
                 if re.search(pat, header_text, re.IGNORECASE):
-                    accumulated[key].append(content)
+                    section_key = key
                     break
+            if section_key is None:
+                continue
+
+            # 5b. For the LAST section header (when it's not "summary"), split off any
+            #     trailing prose paragraph(s) as summary material so they don't get
+            #     swallowed by e.g. the Strengths section.
+            if i + 1 == len(header_matches) and section_key != "summary":
+                paragraphs = [p.strip() for p in re.split(r'\n{2,}', content) if p.strip()]
+                # Work backwards: collect paragraphs that look like prose (not list items
+                # or markdown headers) as a trailing summary block.
+                list_items: list[str] = []
+                trailing_prose: list[str] = []
+                found_list = False
+                for para in reversed(paragraphs):
+                    if not found_list and not re.match(r'^[-*\d#]', para):
+                        trailing_prose.insert(0, para)
+                    else:
+                        found_list = True
+                        list_items.insert(0, para)
+                # Only split if there are both list items AND trailing prose —
+                # avoids stripping Strengths content when there are no list items at all.
+                if trailing_prose and list_items:
+                    accumulated["summary"].append("\n\n".join(trailing_prose))
+                    content = "\n\n".join(list_items).strip()
+
+            if content:
+                accumulated[section_key].append(content)
 
         # 6. If no section headers were found, treat the rest as summary
         if not header_matches and rest_no_score:
             accumulated["summary"].append(rest_no_score)
+
+    # When multiple batches were merged, synthesise Strengths and Summary through
+    # Claude so the output reads as one integrated analysis rather than stacked chunks.
+    if len(report_parts) > 1 and (accumulated["strengths"] or accumulated["summary"]):
+        synth_s, synth_sum = _synthesize_narrative(
+            accumulated["strengths"], accumulated["summary"]
+        )
+        accumulated["strengths"] = [synth_s] if synth_s else []
+        accumulated["summary"]   = [synth_sum] if synth_sum else []
 
     # Build unified output
     out_parts: list[str] = []
@@ -1251,7 +1364,22 @@ def _modal_html() -> str:
 </script>
 """
 def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_url: str = None) -> str:
-    chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if api_url else ""
+    ask_btn = (
+        """<button id="open-chat-btn" style="display:flex;align-items:center;gap:.4rem;"""
+        """padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;"""
+        """font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" """
+        """onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">"""
+        """&#128172; Ask Claude</button>"""
+    ) if api_url else ""
+    new_btn = (
+        """<a href="/" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;"""
+        """background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;"""
+        """font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;"""
+        """transition:border-color .15s,color .15s;" """
+        """onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" """
+        """onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>"""
+    )
+    right_btns = f'<div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;">{ask_btn}{new_btn}</div>'
     chat_panel = _chat_panel_html(api_url) if api_url else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -1315,8 +1443,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
   <div id="top-bar">
     <button class="vp-tab active" onclick="switchVP('desktop',this)">&#128760; Desktop (1440px)</button>
     <button class="vp-tab" onclick="switchVP('mobile',this)">&#128241; Mobile (390px)</button>
-    {chat_btn}
-    <a href="/" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>
+    {right_btns}
   </div>
   <script>
   function switchVP(name,btn){{
