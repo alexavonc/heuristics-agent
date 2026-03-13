@@ -1180,6 +1180,25 @@ def _single_journey_section(
                  data-issue="{issue_data_attr}"
                  onclick="_ssCropClick(this.src,JSON.parse(this.dataset.issue),'{vp}')" />
           </div>"""
+        # Full annotated screenshot — clickable to open modal with overlays
+        full_img_b64 = base64.b64encode(step["screenshot_bytes"]).decode()
+        step_locs = step.get("locations", [])
+        modal_issues = json.dumps([
+            {
+                "issue_number": loc["issue_number"],
+                "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
+                "severity":     loc.get("severity", "Medium"),
+                "bbox_pct":     loc.get("bbox_pct"),
+                **issue_details.get(loc["issue_number"], {}),
+            }
+            for loc in step_locs
+        ])
+        modal_data = _html_mod.escape(modal_issues)
+        full_ss_html = f"""
+        <img src="data:image/png;base64,{full_img_b64}" alt="Step {step['step_num']} screenshot"
+             style="cursor:zoom-in;width:100%;display:block;"
+             data-issues="{modal_data}"
+             onclick="_ssOpen(this.src,JSON.parse(this.dataset.issues),'{vp}')" />"""
         step_cards += f"""
       <div class="step-card">
         <div class="step-header">
@@ -1187,6 +1206,7 @@ def _single_journey_section(
           <span class="step-label">{step['label']}</span>
           <span class="step-url">{step['url']}</span>
         </div>
+        {full_ss_html}
         <div class="crop-list">{crop_imgs}</div>
       </div>"""
     legend_rows = ""
@@ -1354,6 +1374,7 @@ def _analyze_journey_viewport(
         if found:
             step["screenshot_bytes"] = annotate_screenshot(step["screenshot_bytes"], found)
         step["issue_crops"] = crop_to_issue_regions(step["screenshot_bytes"], found)
+        step["locations"] = step_locs
     return steps_data, report_text, locations
 
 # ── Public API functions ──────────────────────────────────────────
@@ -1488,6 +1509,7 @@ def analyze_journey_screenshots(
             "url":              f"step_{i}",
             "screenshot_bytes": annotated,
             "issue_crops":      crop_to_issue_regions(annotated, found),
+            "locations":        step_locs,
         })
     html = generate_journey_html(
         "Uploaded Screenshots",
