@@ -800,63 +800,105 @@ def _extract_issue_details(report_text: str) -> dict:
             result[issue_num] = detail
     return result
 def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
-    """Combine multiple batch reports into one cohesive document: all issues, one strengths section, one score.
+    """Combine multiple batch reports into one cohesive compiled document.
 
-    Splitting strategy: the prompt enforces **Severity:** in every issue block, so the
-    LAST occurrence of **Severity:** is the reliable end-of-issues marker.  Everything
-    after that line is strengths/score/summary regardless of header wording.
+    Extracts Issues, Strengths, Flow Continuity, Progress Visibility, Drop-off Risks,
+    Cross-step Consistency, and Summary from each batch and compiles them into a
+    single unified report — no batch headers, no repeated section titles.
     """
-    all_issues_text: list[str] = []
-    all_strengths_text: list[str] = []
-    all_summaries_text: list[str] = []
+    # Named sections we want to compile (regex pattern → output heading)
+    SECTIONS = [
+        ("flow_continuity",       r"flow\s+continuity(?:\s+assessment)?"),
+        ("progress_visibility",   r"progress\s+visibility"),
+        ("dropoff_risks",         r"drop.?off\s+risks?"),
+        ("cross_step",            r"cross.?step\s+consistency"),
+        ("strengths",             r"strengths?(?:\s+observed)?|areas?\s+of\s+strength"),
+        ("summary",               r"summary"),
+    ]
+    SECTION_HEADING = {
+        "flow_continuity":     "## Flow Continuity Assessment",
+        "progress_visibility": "## Progress Visibility",
+        "dropoff_risks":       "## Drop-off Risks",
+        "cross_step":          "## Cross-step Consistency",
+        "strengths":           "## Strengths",
+        "summary":             "## Summary",
+    }
+    accumulated: dict[str, list[str]] = {key: [] for key, _ in SECTIONS}
+    accumulated["issues"] = []
+
+    # Combined pattern to locate any named section header in the post-issues text
+    all_section_pat = re.compile(
+        r'(?m)^(?:#{1,4}\s*|\*{{1,2}})?(?:' +
+        '|'.join(pat for _, pat in SECTIONS) +
+        r')(?:\s+Assessment)?[^\n]*\n?',
+        re.IGNORECASE,
+    )
 
     for report in report_parts:
-        # Use last **Severity:** line as the split point – always present, always last in issues
+        # 1. Strip top-level title (e.g. "# Nielsen Heuristic Evaluation — AFAP …")
+        report = re.sub(r'(?m)^#{1,2}\s+[^\n]+\n?', '', report, count=2).strip()
+
+        # 2. Split at last **Severity:** — everything before is issues, rest is sections
         sev_matches = list(re.finditer(r'\*\*Severity:\*\*[^\n]*', report, re.IGNORECASE))
         if sev_matches:
             split_pos = sev_matches[-1].end()
-            issues_part = report[:split_pos].strip()
-            rest = report[split_pos:].strip()
+            issues_raw = report[:split_pos].strip()
+            rest       = report[split_pos:].strip()
         else:
-            # Fallback: try any section header that looks like Strengths/Score
             fb = re.search(
-                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:Strengths?|Overall|Summary)',
+                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:' + '|'.join(pat for _, pat in SECTIONS) + r')',
                 report, re.IGNORECASE,
             )
-            issues_part = report[:fb.start()].strip() if fb else report.strip()
-            rest = report[fb.start():].strip() if fb else ""
+            issues_raw = report[:fb.start()].strip() if fb else report.strip()
+            rest       = report[fb.start():].strip() if fb else ""
 
-        if issues_part:
-            all_issues_text.append(issues_part)
+        # 3. Strip "Issues Found" / "## Issues" header from the issues block
+        issues_clean = re.sub(
+            r'(?m)^(?:#{1,4}\s*)?(?:Issues?\s+Found|Issues?)[^\n]*\n?',
+            '', issues_raw, flags=re.IGNORECASE,
+        ).strip()
+        # Also strip leading --- separators
+        issues_clean = re.sub(r'(?m)^---+\s*\n?', '', issues_clean).strip()
+        if issues_clean:
+            accumulated["issues"].append(issues_clean)
 
-        if rest:
-            # Find the score line (e.g. "Overall Journey Score: 7/10" or "Score: 7.5/10")
-            score_m = re.search(r'[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*', rest)
-            if score_m:
-                strengths_raw = rest[:score_m.start()].strip()
-                summary_raw   = rest[score_m.end():].strip()
-            else:
-                strengths_raw = rest.strip()
-                summary_raw   = ""
+        # 4. Remove score line from rest before section extraction
+        rest_no_score = re.sub(r'(?m)^[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*\n?', '', rest).strip()
 
-            # Strip section header lines from strengths block (e.g. "## Strengths", "**Strengths:**")
-            strengths_clean = re.sub(
-                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:Strengths?|Areas?\s+of\s+Strength)[^\n]*\n?',
-                '', strengths_raw, flags=re.IGNORECASE,
-            ).strip()
-            if strengths_clean:
-                all_strengths_text.append(strengths_clean)
+        # 5. Find section header positions in rest_no_score
+        header_matches = list(all_section_pat.finditer(rest_no_score))
 
-            if summary_raw:
-                all_summaries_text.append(summary_raw)
+        for i, m in enumerate(header_matches):
+            header_text = m.group(0).strip()
+            content_start = m.end()
+            content_end   = header_matches[i + 1].start() if i + 1 < len(header_matches) else len(rest_no_score)
+            content = rest_no_score[content_start:content_end].strip()
+            content = re.sub(r'(?m)^---+\s*\n?', '', content).strip()
+            if not content:
+                continue
+            # Identify which section this header belongs to
+            for key, pat in SECTIONS:
+                if re.search(pat, header_text, re.IGNORECASE):
+                    accumulated[key].append(content)
+                    break
 
-    parts = ["\n\n".join(all_issues_text)]
-    if all_strengths_text:
-        parts.append("## Strengths\n\n" + "\n\n".join(all_strengths_text))
-    parts.append(f"## Overall Score: {avg_score}/10")
-    if all_summaries_text:
-        parts.append("\n\n".join(all_summaries_text))
-    return "\n\n".join(parts)
+        # 6. If no section headers were found, treat the rest as summary
+        if not header_matches and rest_no_score:
+            accumulated["summary"].append(rest_no_score)
+
+    # Build unified output
+    out_parts: list[str] = []
+
+    if accumulated["issues"]:
+        out_parts.append("## Issues\n\n" + "\n\n---\n\n".join(accumulated["issues"]))
+
+    for key, _ in SECTIONS:
+        if accumulated[key]:
+            out_parts.append(SECTION_HEADING[key] + "\n\n" + "\n\n".join(accumulated[key]))
+
+    out_parts.append(f"## Overall Score: {avg_score}/10")
+
+    return "\n\n".join(out_parts)
 
 
 def _renumber_issues_in_report(report_text: str, offset: int) -> str:
@@ -1646,7 +1688,7 @@ def analyze_journey_screenshots(
     # averaging Claude's per-batch self-reported scores inflates the result
     # because each batch is scored in isolation without full journey context.
     overall = _compute_score_from_locations(all_locations)
-    merged_report = report_parts[0] if len(report_parts) == 1 else _merge_batch_reports(report_parts, overall)
+    merged_report = _merge_batch_reports(report_parts, overall)
 
     locs_by_step = defaultdict(list)
     for loc in all_locations:
