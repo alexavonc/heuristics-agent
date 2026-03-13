@@ -64,7 +64,10 @@ array that maps each issue number to how to find it on the rendered page:
   {
     "issue_number": 1,
     "short_title": "4-6 word title",
+    "heuristic": "#4 – Consistency and standards",
     "severity": "High",
+    "problem": "One sentence describing the specific UX problem.",
+    "recommendation": "One sentence concrete fix.",
     "text_to_find": "exact short phrase visible on the page near the problem",
     "bbox_pct": {"x": 0.05, "y": 0.12, "w": 0.90, "h": 0.06}
   }
@@ -121,7 +124,10 @@ array that maps each issue to the specific step and text where it can be found:
   {
     "issue_number": 1,
     "short_title": "4-6 word title",
+    "heuristic": "#4 – Consistency and standards",
     "severity": "High",
+    "problem": "One sentence describing the specific UX problem.",
+    "recommendation": "One sentence concrete fix.",
     "step_num": 0,
     "text_to_find": "exact short phrase visible on that step's page",
     "bbox_pct": {"x": 0.05, "y": 0.12, "w": 0.90, "h": 0.06}
@@ -1209,7 +1215,9 @@ def _single_viewport_section(
             "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
             "severity":     loc.get("severity", "Medium"),
             "bbox_pct":     loc.get("bbox_pct"),
-            **issue_details.get(loc["issue_number"], {}),
+            "heuristic":    loc.get("heuristic") or issue_details.get(loc["issue_number"], {}).get("heuristic"),
+            "problem":      loc.get("problem") or issue_details.get(loc["issue_number"], {}).get("problem"),
+            "recommendation": loc.get("recommendation") or issue_details.get(loc["issue_number"], {}).get("recommendation"),
         }
         for loc in locations
     ])
@@ -1267,7 +1275,9 @@ def _single_journey_section(
                 "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
                 "severity":     loc.get("severity", "Medium"),
                 "bbox_pct":     loc.get("bbox_pct"),
-                **issue_details.get(loc["issue_number"], {}),
+                "heuristic":    loc.get("heuristic") or issue_details.get(loc["issue_number"], {}).get("heuristic"),
+                "problem":      loc.get("problem") or issue_details.get(loc["issue_number"], {}).get("problem"),
+                "recommendation": loc.get("recommendation") or issue_details.get(loc["issue_number"], {}).get("recommendation"),
             }
             for loc in step_locs
         ])
