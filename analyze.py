@@ -765,6 +765,18 @@ def _extract_issue_details(report_text: str) -> dict:
         if detail:
             result[issue_num] = detail
     return result
+def _renumber_issues_in_report(report_text: str, offset: int) -> str:
+    """Add offset to every issue number in a report text block."""
+    if offset == 0:
+        return report_text
+    def _replace(m):
+        return m.group(0).replace(m.group(1), str(int(m.group(1)) + offset), 1)
+    return re.sub(
+        r'(?mi)^((?:#{1,4}\s*)?(?:\*\*)?Issue\s+)(\d+)',
+        lambda m: m.group(1) + str(int(m.group(2)) + offset),
+        report_text,
+    )
+
 def _escape_report(report_text: str) -> str:
     escaped = (
         report_text
@@ -1512,13 +1524,15 @@ def analyze_journey_screenshots(
         batch = step_images[batch_start:batch_start + _JOURNEY_BATCH_SIZE]
         full_response = call_claude_journey_screenshots(batch, step_offset=batch_start)
         report_text, locations = parse_response(full_response)
+        # Renumber report text FIRST (before offsetting locations) so numbers stay in sync
+        renumbered_report = _renumber_issues_in_report(report_text, issue_offset)
         # Offset issue numbers so they don't collide across batches
         for loc in locations:
             loc["issue_number"] += issue_offset
         if locations:
             issue_offset = max(loc["issue_number"] for loc in locations)
         all_locations.extend(locations)
-        report_parts.append(report_text)
+        report_parts.append(renumbered_report)
 
     # Merge report texts; prepend overall score line for _extract_score to find
     if len(report_parts) == 1:
