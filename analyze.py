@@ -757,18 +757,63 @@ def _extract_issue_details(report_text: str) -> dict:
         end = headers[i + 1].start() if i + 1 < len(headers) else len(report_text)
         block = report_text[start:end]
         detail = {}
-        hm = re.search(r'\*\*Heuristics?\*\*[:\s*]+(.+?)(?:\n|$)', block, re.IGNORECASE)
+        hm = re.search(r'\*\*Heuristics?\*\*:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
         if hm:
             detail['heuristic'] = hm.group(1).strip().rstrip('*').strip()
-        pm = re.search(r'\*\*Problem\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+        pm = re.search(r'\*\*Problem\*\*:\s*(.+?)(?=\n\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
         if pm:
             detail['problem'] = ' '.join(pm.group(1).split())
-        rm = re.search(r'\*\*Recommendation\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+        rm = re.search(r'\*\*Recommendation\*\*:\s*(.+?)(?=\n\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
         if rm:
             detail['recommendation'] = ' '.join(rm.group(1).split())
         if detail:
             result[issue_num] = detail
     return result
+def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
+    """Combine multiple batch reports into one cohesive document: all issues, one strengths section, one score."""
+    _section_re = re.compile(
+        r'(?m)^(?:#{1,4}\s*)?(?:\*\*)?(?:Strengths?|Overall\s+(?:Journey\s+)?Score|Summary|Journey\s+Score)',
+        re.IGNORECASE,
+    )
+    all_issues_text = []
+    all_strengths_text = []
+    all_summaries_text = []
+
+    for report in report_parts:
+        m = _section_re.search(report)
+        issues_part = report[:m.start()].strip() if m else report.strip()
+        rest = report[m.start():].strip() if m else ""
+
+        if issues_part:
+            all_issues_text.append(issues_part)
+
+        if rest:
+            # Extract strengths block
+            sm = re.search(
+                r'(?:Strengths?[:\s]*\n)(.*?)(?=\n#{1,4}|\n\*\*[A-Z]|\Z)',
+                rest, re.IGNORECASE | re.DOTALL,
+            )
+            if sm:
+                txt = sm.group(1).strip()
+                if txt:
+                    all_strengths_text.append(txt)
+
+            # Extract summary (text after the score line)
+            score_m = re.search(r'\b\d+(?:\.\d+)?\s*/\s*10\b', rest)
+            if score_m:
+                after = rest[rest.find('\n', score_m.start()):].strip() if '\n' in rest[score_m.start():] else ""
+                if after:
+                    all_summaries_text.append(after)
+
+    parts = ["\n\n".join(all_issues_text)]
+    if all_strengths_text:
+        parts.append("## Strengths\n" + "\n".join(all_strengths_text))
+    parts.append(f"## Overall Score: {avg_score}/10")
+    if all_summaries_text:
+        parts.append("\n\n".join(all_summaries_text))
+    return "\n\n".join(parts)
+
+
 def _renumber_issues_in_report(report_text: str, offset: int) -> str:
     """Add offset to every issue number in a report text block."""
     if offset == 0:
@@ -1518,18 +1563,10 @@ def analyze_journey_screenshots(
         all_locations.extend(locations)
         report_parts.append(renumbered_report)
 
-    # Merge report texts; prepend overall score line for _extract_score to find
-    if len(report_parts) == 1:
-        merged_report = report_parts[0]
-    else:
-        batch_scores = [s for s in (_extract_score(r) for r in report_parts) if s is not None]
-        overall = round(sum(batch_scores) / len(batch_scores), 1) if batch_scores else 5.0
-        sections = []
-        for idx, rpt in enumerate(report_parts):
-            b_start = idx * _JOURNEY_BATCH_SIZE
-            b_end   = min(b_start + _JOURNEY_BATCH_SIZE - 1, len(step_images) - 1)
-            sections.append(f"=== Steps {b_start}–{b_end} ===\n{rpt}")
-        merged_report = f"Overall Score: {overall}/10\n\n" + "\n\n".join(sections)
+    # Merge report texts into one cohesive document
+    batch_scores = [s for s in (_extract_score(r) for r in report_parts) if s is not None]
+    overall = round(sum(batch_scores) / len(batch_scores), 1) if batch_scores else 5.0
+    merged_report = report_parts[0] if len(report_parts) == 1 else _merge_batch_reports(report_parts, overall)
 
     locs_by_step = defaultdict(list)
     for loc in all_locations:
