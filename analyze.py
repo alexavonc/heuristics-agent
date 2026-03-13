@@ -54,7 +54,15 @@ For each issue found, use EXACTLY this format:
 **Severity:** Critical / High / Medium / Low
 
 Also list any strengths you observe.
-End with an overall score out of 10 and a one-paragraph summary.
+End with an overall score out of 10 using this rubric:
+- 9–10: Near-perfect — only minor polish needed; no significant usability blockers
+- 7–8: Good — functional with a few friction points that could hurt conversions
+- 5–6: Needs Work — notable violations affecting key flows; several issues to fix
+- 3–4: Poor — significant UX failures hurting conversions; major rework needed
+- 0–2: Critical — fundamental redesign required; core tasks are difficult or impossible
+Be strict: even 1 High severity issue should bring the score to 8 or below;
+2+ High severity issues should result in 6 or below.
+Give the score as "Overall Score: X/10" then a one-paragraph summary.
 Be specific. Reference the actual text, buttons, and labels you can see.
 Avoid generic advice — tie everything back to the exact content provided.
 IMPORTANT: After your full report, append a <LOCATIONS> block containing a JSON
@@ -113,7 +121,15 @@ Also evaluate:
 - Drop-off risks: where are users most likely to abandon?
 - Cross-step consistency: do labels, tone, and design stay consistent?
 List any strengths you observe.
-End with an overall journey score out of 10 and a paragraph summary of the \
+End with an overall journey score out of 10 using this rubric:
+- 9–10: Near-perfect — only minor polish needed; no significant usability blockers
+- 7–8: Good — functional with a few friction points that could hurt conversions
+- 5–6: Needs Work — notable violations affecting key flows; several issues to fix
+- 3–4: Poor — significant UX failures hurting conversions; major rework needed
+- 0–2: Critical — fundamental redesign required; core tasks are difficult or impossible
+Be strict: even 1 High severity issue should bring the score to 8 or below;
+2+ High severity issues should result in 6 or below.
+Give the score as "Overall Score: X/10" then a paragraph summary of the \
 biggest friction points and quick wins.
 Be specific. Reference actual text, buttons, and labels you can see in the \
 screenshots. Tie everything back to the exact content provided.
@@ -682,6 +698,13 @@ RUBRIC = [
     (0,  2, "#dc2626", "Critical",   "Fundamental redesign required"),
 ]
 SEV_WEIGHTS = {"Critical": 2.0, "High": 1.5, "Medium": 0.75, "Low": 0.25}
+_PENALTY_FACTOR = 0.35  # each weight unit subtracts this many score points
+def _compute_score_from_locations(locations: list) -> float:
+    """Compute a deterministic score from issue severities (10 = no issues, lower = more/worse issues)."""
+    if not locations:
+        return 10.0
+    total_weight = sum(SEV_WEIGHTS.get(loc.get("severity", "Medium"), 0.75) for loc in locations)
+    return round(max(0.0, min(10.0, 10.0 - total_weight * _PENALTY_FACTOR)), 1)
 def _extract_score(report_text: str) -> float | None:
     m = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', report_text, re.IGNORECASE)
     if m:
@@ -1258,10 +1281,11 @@ def _single_journey_section(
     steps_data: list[dict], report_text: str, locations: list,
     viewport_label: str = "desktop", api_url: str = None,
     issue_details_override: dict = None,
+    score_override: float | None = None,
 ) -> str:
     vp = viewport_label
     issue_details = issue_details_override if issue_details_override is not None else _extract_issue_details(report_text)
-    score_val = _extract_score(report_text) or 0.0
+    score_val = score_override if score_override is not None else (_extract_score(report_text) or 0.0)
     step_cards = ""
     for step in steps_data:
         crops = step.get("issue_crops", [])
@@ -1348,9 +1372,10 @@ def generate_journey_html(
     mobile_steps: list[dict],  mobile_report: str,  mobile_locs: list,
     api_url: str = None,
     issue_details_override: dict = None,
+    score_override: float | None = None,
 ) -> str:
-    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", api_url, issue_details_override)
-    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  api_url, issue_details_override)
+    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", api_url, issue_details_override, score_override)
+    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  api_url, issue_details_override, score_override)
     return _html_shell(
         title="Journey Heuristic Evaluation Report",
         subtitle=f"Journey starting at {start_url} &nbsp;&middot;&nbsp; {len(desktop_steps)} steps",
@@ -1616,9 +1641,11 @@ def analyze_journey_screenshots(
         all_locations.extend(locations)
         report_parts.append(renumbered_report)
 
-    # Merge report texts into one cohesive document
-    batch_scores = [s for s in (_extract_score(r) for r in report_parts) if s is not None]
-    overall = round(sum(batch_scores) / len(batch_scores), 1) if batch_scores else 5.0
+    # Merge report texts into one cohesive document.
+    # Use penalty-based scoring from aggregated locations for accuracy —
+    # averaging Claude's per-batch self-reported scores inflates the result
+    # because each batch is scored in isolation without full journey context.
+    overall = _compute_score_from_locations(all_locations)
     merged_report = report_parts[0] if len(report_parts) == 1 else _merge_batch_reports(report_parts, overall)
 
     locs_by_step = defaultdict(list)
@@ -1645,10 +1672,11 @@ def analyze_journey_screenshots(
         steps_data, merged_report, all_locations,
         api_url=api_url,
         issue_details_override=all_issue_details,
+        score_override=overall,
     )
     return {
         "html":        html,
         "report_text": merged_report,
         "locations":   all_locations,
-        "score":       _extract_score(merged_report),
+        "score":       overall,
     }
