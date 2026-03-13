@@ -194,6 +194,7 @@ def _chat_panel_html(api_url: str) -> str:
   </div>
   <script>
   var _chatApiUrl='{api_url}';
+  var _reportId=window.location.pathname.split('/').filter(Boolean).pop()||'';
   var _chist=[],_cbusy=false,_selCtx='';
   function _gel(id){{return document.getElementById(id);}}
   function _cmsg(role,text){{
@@ -247,7 +248,7 @@ def _chat_panel_html(api_url: str) -> str:
       var resp=await fetch(_chatApiUrl+'/api/chat',{{
         method:'POST',
         headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{messages:_chist}})
+        body:JSON.stringify({{report_id:_reportId,messages:_chist}})
       }});
       var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',acc='';
       for(;;){{
