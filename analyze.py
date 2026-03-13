@@ -730,7 +730,7 @@ def _rubric_rows_html(score: float, vp: str) -> str:
         active = mn <= score <= mx
         bg     = "rgba(99,102,241,.12)" if active else "transparent"
         border = "3px solid #6366f1"    if active else "3px solid transparent"
-        tc     = "#f8fafc"              if active else "#94a3b8"
+        tc     = "#0f172a"              if active else "#94a3b8"
         rows += (
             f'<div class="rr" data-min="{mn}" data-max="{mx}" '
             f'style="display:flex;align-items:baseline;gap:.5rem;padding:.3rem .5rem;'
@@ -1230,7 +1230,7 @@ def _modal_html() -> str:
       var active = score >= mn && score <= mx;
       row.style.background    = active ? 'rgba(99,102,241,.12)' : 'transparent';
       row.style.borderLeft    = active ? '3px solid #6366f1'    : '3px solid transparent';
-      row.querySelector('span:nth-child(2)').style.color = active ? '#f8fafc' : '#94a3b8';
+      row.querySelector('span:nth-child(2)').style.color = active ? '#0f172a' : '#94a3b8';
     });
   }
   function _updateLegendRow(vp, issueNum, isIgnored) {
@@ -1316,6 +1316,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
     <button class="vp-tab active" onclick="switchVP('desktop',this)">&#128760; Desktop (1440px)</button>
     <button class="vp-tab" onclick="switchVP('mobile',this)">&#128241; Mobile (390px)</button>
     {chat_btn}
+    <a href="/" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;transition:border-color .15s,color .15s;" onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>
   </div>
   <script>
   function switchVP(name,btn){{
