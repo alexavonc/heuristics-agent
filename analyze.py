@@ -770,44 +770,59 @@ def _extract_issue_details(report_text: str) -> dict:
             result[issue_num] = detail
     return result
 def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
-    """Combine multiple batch reports into one cohesive document: all issues, one strengths section, one score."""
-    _section_re = re.compile(
-        r'(?m)^(?:#{1,4}\s*)?(?:\*\*)?(?:Strengths?|Overall\s+(?:Journey\s+)?Score|Summary|Journey\s+Score)',
-        re.IGNORECASE,
-    )
-    all_issues_text = []
-    all_strengths_text = []
-    all_summaries_text = []
+    """Combine multiple batch reports into one cohesive document: all issues, one strengths section, one score.
+
+    Splitting strategy: the prompt enforces **Severity:** in every issue block, so the
+    LAST occurrence of **Severity:** is the reliable end-of-issues marker.  Everything
+    after that line is strengths/score/summary regardless of header wording.
+    """
+    all_issues_text: list[str] = []
+    all_strengths_text: list[str] = []
+    all_summaries_text: list[str] = []
 
     for report in report_parts:
-        m = _section_re.search(report)
-        issues_part = report[:m.start()].strip() if m else report.strip()
-        rest = report[m.start():].strip() if m else ""
+        # Use last **Severity:** line as the split point – always present, always last in issues
+        sev_matches = list(re.finditer(r'\*\*Severity:\*\*[^\n]*', report, re.IGNORECASE))
+        if sev_matches:
+            split_pos = sev_matches[-1].end()
+            issues_part = report[:split_pos].strip()
+            rest = report[split_pos:].strip()
+        else:
+            # Fallback: try any section header that looks like Strengths/Score
+            fb = re.search(
+                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:Strengths?|Overall|Summary)',
+                report, re.IGNORECASE,
+            )
+            issues_part = report[:fb.start()].strip() if fb else report.strip()
+            rest = report[fb.start():].strip() if fb else ""
 
         if issues_part:
             all_issues_text.append(issues_part)
 
         if rest:
-            # Extract strengths block
-            sm = re.search(
-                r'(?:Strengths?[:\s]*\n)(.*?)(?=\n#{1,4}|\n\*\*[A-Z]|\Z)',
-                rest, re.IGNORECASE | re.DOTALL,
-            )
-            if sm:
-                txt = sm.group(1).strip()
-                if txt:
-                    all_strengths_text.append(txt)
-
-            # Extract summary (text after the score line)
-            score_m = re.search(r'\b\d+(?:\.\d+)?\s*/\s*10\b', rest)
+            # Find the score line (e.g. "Overall Journey Score: 7/10" or "Score: 7.5/10")
+            score_m = re.search(r'[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*', rest)
             if score_m:
-                after = rest[rest.find('\n', score_m.start()):].strip() if '\n' in rest[score_m.start():] else ""
-                if after:
-                    all_summaries_text.append(after)
+                strengths_raw = rest[:score_m.start()].strip()
+                summary_raw   = rest[score_m.end():].strip()
+            else:
+                strengths_raw = rest.strip()
+                summary_raw   = ""
+
+            # Strip section header lines from strengths block (e.g. "## Strengths", "**Strengths:**")
+            strengths_clean = re.sub(
+                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:Strengths?|Areas?\s+of\s+Strength)[^\n]*\n?',
+                '', strengths_raw, flags=re.IGNORECASE,
+            ).strip()
+            if strengths_clean:
+                all_strengths_text.append(strengths_clean)
+
+            if summary_raw:
+                all_summaries_text.append(summary_raw)
 
     parts = ["\n\n".join(all_issues_text)]
     if all_strengths_text:
-        parts.append("## Strengths\n" + "\n".join(all_strengths_text))
+        parts.append("## Strengths\n\n" + "\n\n".join(all_strengths_text))
     parts.append(f"## Overall Score: {avg_score}/10")
     if all_summaries_text:
         parts.append("\n\n".join(all_summaries_text))
@@ -827,22 +842,33 @@ def _renumber_issues_in_report(report_text: str, offset: int) -> str:
     )
 
 def _escape_report(report_text: str) -> str:
-    escaped = (
-        report_text
-        .encode("utf-8", errors="replace").decode("utf-8")
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-    )
+    # 1. Apply severity colour substitutions on raw markdown before HTML-escaping,
+    #    so we can emit real HTML tags without them getting escaped.
+    coloured: dict[str, str] = {}
+    text = report_text.encode("utf-8", errors="replace").decode("utf-8")
     for sev, color in SEVERITY_HEX.items():
-        escaped = escaped.replace(
-            f"**{sev}**",
-            f'<strong style="color:{color}">{sev}</strong>',
-        )
-        escaped = escaped.replace(
-            f"Severity:** **{sev}**",
-            f'Severity: <strong style="color:{color}">{sev}</strong>',
-        )
+        placeholder = f"\x00SEV_{sev}\x00"
+        text = text.replace(f"**{sev}**", placeholder)
+        text = text.replace(f"Severity:** **{sev}**", f"Severity:** {placeholder}")
+        coloured[placeholder] = f'<strong style="color:{color}">{sev}</strong>'
+
+    # 2. HTML-escape the rest (no real < > & remain in normal report text)
+    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    # 3. Restore severity HTML
+    for placeholder, html in coloured.items():
+        escaped = escaped.replace(placeholder, html)
+
+    # 4. Convert markdown headers to styled HTML (must happen after HTML-escaping
+    #    so the injected tags are not double-escaped)
+    escaped = re.sub(r'(?m)^#### ([^\n]+)$', r'<h4 class="rpt-h4">\1</h4>', escaped)
+    escaped = re.sub(r'(?m)^### ([^\n]+)$',  r'<h3 class="rpt-h3">\1</h3>', escaped)
+    escaped = re.sub(r'(?m)^## ([^\n]+)$',   r'<h2 class="rpt-h2">\1</h2>', escaped)
+    escaped = re.sub(r'(?m)^# ([^\n]+)$',    r'<h1 class="rpt-h1">\1</h1>', escaped)
+
+    # 5. Convert remaining **bold** spans
+    escaped = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', escaped)
+
     return escaped
 def _viewport_tab_html(desktop_content: str, mobile_content: str) -> str:
     return f"""
@@ -948,17 +974,27 @@ def _modal_html() -> str:
     var chatBtn = hasChat
       ? '<button id="ss-ask-btn" style="width:100%;padding:.65rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.88rem;font-family:system-ui,sans-serif;">&#128172; Ask Claude about this</button>'
       : '';
+    var heuristicBadge = issue.heuristic
+      ? '<span style="background:#1e3a5f;color:#93c5fd;border-radius:4px;padding:.15rem .55rem;font-size:.72rem;font-weight:600;font-family:system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;display:inline-block;vertical-align:middle;" title="'+_esc(issue.heuristic)+'">'+_esc(issue.heuristic)+'</span>'
+      : '';
+    var problemHtml = issue.problem
+      ? '<p style="font-size:.83rem;color:#cbd5e1;line-height:1.6;font-family:system-ui,sans-serif;margin-bottom:1rem;">'+_esc(issue.problem)+'</p>'
+      : '';
+    var recHtml = issue.recommendation
+      ? '<div style="background:#0f2137;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:.65rem .85rem;margin-bottom:1.1rem;">' +
+          '<div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;font-family:system-ui,sans-serif;margin-bottom:.3rem;">Recommendation</div>' +
+          '<p style="font-size:.83rem;color:#cbd5e1;line-height:1.6;font-family:system-ui,sans-serif;margin:0;">'+_esc(issue.recommendation)+'</p>' +
+        '</div>'
+      : '';
     content.innerHTML =
-      '<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem;">' +
-        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.25rem .7rem;font-size:1rem;font-weight:700;font-family:system-ui,sans-serif;">#'+issue.issue_number+'</span>' +
-        '<span style="background:'+color+'33;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.78rem;font-weight:600;font-family:system-ui,sans-serif;">'+_esc(issue.severity)+'</span>' +
+      '<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.85rem;">' +
+        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.25rem .65rem;font-size:.95rem;font-weight:700;font-family:system-ui,sans-serif;flex-shrink:0;">#'+issue.issue_number+'</span>' +
+        '<span style="background:'+color+'33;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.75rem;font-weight:600;font-family:system-ui,sans-serif;flex-shrink:0;">'+_esc(issue.severity)+'</span>' +
+        heuristicBadge +
       '</div>' +
-      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:1rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
-      '<div style="border-top:1px solid #334155;padding-top:.9rem;margin-bottom:1rem;">' +
-        _ssField('Heuristic', issue.heuristic) +
-        _ssField('Problem', issue.problem) +
-        _ssField('Recommendation', issue.recommendation) +
-      '</div>' +
+      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:.75rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
+      problemHtml +
+      recHtml +
       ignBtn +
       chatBtn;
     if(vp) {
@@ -1099,6 +1135,12 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
       color: white; font-weight: 600; font-size: 0.75rem; }}
     .report-body {{ font-size: 0.92rem; white-space: pre-wrap; word-wrap: break-word;
       color: #334155; line-height: 1.75; }}
+    .report-body h1,.report-body h2,.report-body h3,.report-body h4 {{
+      white-space: normal; margin: 1.4em 0 0.4em; font-family: inherit; }}
+    .report-body .rpt-h1,.report-body .rpt-h2 {{ font-size: 1.15rem; font-weight: 700;
+      color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25em; }}
+    .report-body .rpt-h3 {{ font-size: 1rem; font-weight: 700; color: #1e293b; }}
+    .report-body .rpt-h4 {{ font-size: 0.95rem; font-weight: 600; color: #475569; }}
     ::selection {{ background: #bfdbfe; color: #1e3a8a; }}
     {extra_css}
   </style>
