@@ -799,6 +799,43 @@ def _extract_issue_details(report_text: str) -> dict:
         if detail:
             result[issue_num] = detail
     return result
+def _numbered_to_bullets(text: str) -> str:
+    """Convert numbered list items (1. / 2. etc.) to bullet points."""
+    return re.sub(r'(?m)^\s*\d+\.\s+', '- ', text)
+
+
+def _list_to_table(text: str, col1: str, col2: str) -> str:
+    """Convert a bullet/numbered list with 'Key: value' or '**Key** value' into a markdown table.
+
+    Any introductory paragraph before the list is preserved above the table.
+    Falls back to the original text if no parseable rows are found.
+    """
+    # Match list items: optional bullet/number, then bold-or-plain key, then delimiter, then value
+    item_pat = re.compile(
+        r'(?m)^[-*\d.]+\s+(?:\*\*([^*\n]+)\*\*[:\s–—\-]+|([^:\n–—]+)[:\s–—]+)(.+?)(?=\n[-*\d\n]|\Z)',
+        re.DOTALL,
+    )
+    rows: list[tuple[str, str]] = []
+    last_end = 0
+    intro_end = None
+    for m in item_pat.finditer(text):
+        if intro_end is None:
+            intro_end = m.start()
+        key = (m.group(1) or m.group(2) or '').strip().rstrip(':–—-').strip()
+        val = m.group(3).strip().replace('\n', ' ')
+        rows.append((key, val))
+        last_end = m.end()
+
+    if not rows:
+        return text
+
+    intro = text[:intro_end].strip() if intro_end else ''
+    table = f"| {col1} | {col2} |\n|---|---|\n"
+    for k, v in rows:
+        table += f"| {k} | {v} |\n"
+    return (intro + '\n\n' + table).strip() if intro else table.strip()
+
+
 def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
     """Combine multiple batch reports into one cohesive compiled document.
 
@@ -892,11 +929,38 @@ def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
     if accumulated["issues"]:
         out_parts.append("## Issues\n\n" + "\n\n---\n\n".join(accumulated["issues"]))
 
-    for key, _ in SECTIONS:
-        if accumulated[key]:
-            out_parts.append(SECTION_HEADING[key] + "\n\n" + "\n\n".join(accumulated[key]))
+    # Strengths: convert numbered list to bullet points
+    if accumulated["strengths"]:
+        strengths_text = _numbered_to_bullets("\n\n".join(accumulated["strengths"]))
+        out_parts.append("## Strengths\n\n" + strengths_text)
 
-    out_parts.append(f"## Overall Score: {avg_score}/10")
+    # Summary section: General (flow continuity table, progress visibility, cross-step)
+    # and Quick Wins (drop-off risks, summary text)
+    summary_parts: list[str] = []
+
+    general_chunks: list[str] = []
+    if accumulated["flow_continuity"]:
+        fc_text = "\n\n".join(accumulated["flow_continuity"])
+        general_chunks.append(_list_to_table(fc_text, "Transition", "Assessment"))
+    if accumulated["progress_visibility"]:
+        general_chunks.append("\n\n".join(accumulated["progress_visibility"]))
+    if accumulated["cross_step"]:
+        cs_text = "\n\n".join(accumulated["cross_step"])
+        general_chunks.append(_list_to_table(cs_text, "Element", "Consistency Note"))
+    if general_chunks:
+        summary_parts.append("### General\n\n" + "\n\n".join(general_chunks))
+
+    quick_wins_chunks: list[str] = []
+    if accumulated["dropoff_risks"]:
+        dr_text = "\n\n".join(accumulated["dropoff_risks"])
+        quick_wins_chunks.append(_list_to_table(dr_text, "Drop-off Point", "Risk"))
+    if accumulated["summary"]:
+        quick_wins_chunks.append("\n\n".join(accumulated["summary"]))
+    if quick_wins_chunks:
+        summary_parts.append("### Quick Wins\n\n" + "\n\n".join(quick_wins_chunks))
+
+    if summary_parts:
+        out_parts.append("## Summary\n\n" + "\n\n".join(summary_parts))
 
     return "\n\n".join(out_parts)
 
@@ -940,6 +1004,26 @@ def _escape_report(report_text: str) -> str:
 
     # 5. Convert remaining **bold** spans
     escaped = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', escaped)
+
+    # 6. Convert markdown tables to HTML tables
+    def _render_md_table(m: re.Match) -> str:
+        html_rows: list[str] = []
+        is_header = True
+        for line in m.group(0).strip().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if re.match(r'^\|[-:| ]+\|$', line):   # separator row
+                is_header = False
+                continue
+            cells = [c.strip() for c in line.strip('|').split('|')]
+            tag = 'th' if is_header else 'td'
+            html_rows.append('<tr>' + ''.join(f'<{tag}>{c}</{tag}>' for c in cells) + '</tr>')
+            if is_header:
+                is_header = False
+        return '<table class="rpt-table"><tbody>' + ''.join(html_rows) + '</tbody></table>'
+
+    escaped = re.sub(r'(?m)(?:^\|[^\n]+\|\n)+', _render_md_table, escaped)
 
     return escaped
 def _viewport_tab_html(desktop_content: str, mobile_content: str) -> str:
@@ -1213,6 +1297,12 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
       color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25em; }}
     .report-body .rpt-h3 {{ font-size: 1rem; font-weight: 700; color: #1e293b; }}
     .report-body .rpt-h4 {{ font-size: 0.95rem; font-weight: 600; color: #475569; }}
+    .report-body .rpt-table {{ width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.875rem; }}
+    .report-body .rpt-table th {{ background: #f1f5f9; color: #1e293b; font-weight: 700;
+      text-align: left; padding: 0.5rem 0.75rem; border: 1px solid #e2e8f0; }}
+    .report-body .rpt-table td {{ padding: 0.45rem 0.75rem; border: 1px solid #e2e8f0;
+      vertical-align: top; color: #334155; }}
+    .report-body .rpt-table tr:nth-child(even) td {{ background: #f8fafc; }}
     ::selection {{ background: #bfdbfe; color: #1e3a8a; }}
     {extra_css}
   </style>
