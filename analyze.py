@@ -376,15 +376,16 @@ def _launch_browser(p, headless: bool = True):
     Launch Chromium. Falls back to the system-installed chromium binary
     (provided by nixpacks) if Playwright's bundled browser is missing.
     """
+    sandbox_args = ["--no-sandbox", "--disable-setuid-sandbox"]
     try:
-        return p.chromium.launch(headless=headless)
+        return p.chromium.launch(headless=headless, args=sandbox_args)
     except Exception:
         pass
     for name in ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]:
         path = shutil.which(name)
         if path:
             try:
-                return p.chromium.launch(executable_path=path, headless=headless)
+                return p.chromium.launch(executable_path=path, headless=headless, args=sandbox_args)
             except Exception:
                 continue
     raise RuntimeError(
