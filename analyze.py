@@ -374,22 +374,25 @@ def _chat_panel_html(port: int) -> str:
 def _launch_browser(p, headless: bool = True):
     """
     Launch Chromium. Falls back to the system-installed chromium binary
-    (provided by nixpacks) if Playwright's bundled browser is missing.
+    if Playwright's bundled browser is missing.
     """
     sandbox_args = ["--no-sandbox", "--disable-setuid-sandbox"]
+    first_error = None
     try:
         return p.chromium.launch(headless=headless, args=sandbox_args)
-    except Exception:
-        pass
+    except Exception as e:
+        first_error = e
+        print(f"  [browser] Playwright bundled Chromium failed: {e}")
     for name in ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]:
         path = shutil.which(name)
         if path:
             try:
                 return p.chromium.launch(executable_path=path, headless=headless, args=sandbox_args)
-            except Exception:
+            except Exception as e:
+                print(f"  [browser] System chromium at {path} failed: {e}")
                 continue
     raise RuntimeError(
-        "No usable Chromium found. Run: playwright install chromium --with-deps"
+        f"No usable Chromium found. Original error: {first_error}"
     )
 
 
