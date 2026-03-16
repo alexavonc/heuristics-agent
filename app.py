@@ -1,10 +1,13 @@
 import os
+import queue
+import threading
 import uuid
 import json
 import httpx
 import anthropic
 from flask import Flask, request, Response, jsonify, send_from_directory
 from flask_cors import CORS
+
 from analyze import (
     analyze_url,
     analyze_journey,
@@ -13,14 +16,7 @@ from analyze import (
     GENERAL_CHAT_SYSTEM_PROMPT,
     _safe_bytes,
 )
-
-try:
-    from benchmark import run_benchmark
-    BENCHMARK_AVAILABLE = True
-except Exception as _bench_err:
-    run_benchmark = None
-    BENCHMARK_AVAILABLE = False
-    print(f"[WARN] benchmark unavailable: {_bench_err}")
+from benchmark import run_benchmark
 
 app = Flask(__name__)
 CORS(app)
@@ -31,15 +27,18 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
 
+
 # ── Frontend ──────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
 
+
 # ── Health ────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
+
 
 # ── Analyze: live URL ─────────────────────────────────────────────
 @app.route("/api/analyze", methods=["POST"])
@@ -47,8 +46,10 @@ def api_analyze():
     data  = request.get_json(force=True)
     url   = data.get("url")
     steps = data.get("steps")
+
     if not url:
         return jsonify({"error": "url is required"}), 400
+
     try:
         if steps:
             result = analyze_journey(url, steps, api_url=API_BASE_URL)
@@ -56,6 +57,7 @@ def api_analyze():
             result = analyze_url(url, api_url=API_BASE_URL)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
     report_id = str(uuid.uuid4())
     _reports[report_id] = result
     return jsonify({
@@ -64,10 +66,12 @@ def api_analyze():
         "mobile_score":  result.get("mobile_score"),
     })
 
+
 # ── Analyze: screenshot upload ────────────────────────────────────
 @app.route("/api/analyze/screenshots", methods=["POST"])
 def api_analyze_screenshots():
     journey = request.form.get("journey", "false").lower() == "true"
+
     try:
         if journey:
             files       = request.files.getlist("steps[]")
@@ -79,7 +83,7 @@ def api_analyze_screenshots():
             desktop_file = request.files.get("desktop")
             if not desktop_file:
                 return jsonify({"error": "desktop image is required"}), 400
-            mobile_file  = request.files.get("mobile")
+            mobile_file = request.files.get("mobile")
             result = analyze_screenshots(
                 desktop_file.read(),
                 mobile_file.read() if mobile_file else None,
@@ -87,6 +91,7 @@ def api_analyze_screenshots():
             )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
     report_id = str(uuid.uuid4())
     _reports[report_id] = result
     return jsonify({
@@ -96,6 +101,7 @@ def api_analyze_screenshots():
         "score":         result.get("score"),
     })
 
+
 # ── Fetch report HTML ─────────────────────────────────────────────
 @app.route("/api/report/<report_id>")
 def get_report(report_id):
@@ -104,6 +110,7 @@ def get_report(report_id):
         return jsonify({"error": "Report not found"}), 404
     html = report.get("html", "<h1>No HTML available</h1>")
     return Response(_safe_bytes(html), 200, {"Content-Type": "text/html; charset=utf-8"})
+
 
 # ── Fetch report JSON data ────────────────────────────────────────
 @app.route("/api/report/<report_id>/data")
@@ -120,15 +127,18 @@ def get_report_data(report_id):
         "mobile_locs":   report.get("mobile_locs", []),
     })
 
+
 # ── Chat (SSE stream) ─────────────────────────────────────────────
 @app.route("/api/chat", methods=["POST"])
 def chat():
     data      = request.get_json(force=True)
     report_id = data.get("report_id", "")
     messages  = data.get("messages", [])
+
     report      = _reports.get(report_id, {})
     report_text = report.get("report_text", "No report available.")
     system      = GENERAL_CHAT_SYSTEM_PROMPT.format(report_text=report_text)
+
     def _gen():
         client = anthropic.Anthropic(
             api_key=API_KEY,
@@ -143,56 +153,89 @@ def chat():
             for text in stream.text_stream:
                 yield f"data: {json.dumps({'text': text})}\n\n"
         yield "data: [DONE]\n\n"
+
     return Response(
         _gen(),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-# ── Benchmark (SSE stream) ─────────────────────────────────────────
+
+# ── Benchmark (real SSE streaming via thread + queue) ─────────────
 @app.route("/api/benchmark", methods=["POST"])
 def api_benchmark():
-    if not BENCHMARK_AVAILABLE:
-        return jsonify({"error": "Benchmark module not available"}), 503
+    """
+    Body (JSON): { "report_id": "..." }
 
+    Returns text/event-stream:
+      data: {"type": "progress", "message": "..."}   — live status (many)
+      data: {"type": "complete", "report_id": "..."}  — success
+      data: {"type": "error",    "message": "..."}    — failure
+    """
     data      = request.get_json(force=True)
     report_id = data.get("report_id", "")
+
     report = _reports.get(report_id)
     if not report:
         return jsonify({"error": "Report not found"}), 404
+
     report_text = report.get("report_text", "")
     if not report_text:
         return jsonify({"error": "No report text available for benchmarking"}), 400
 
-    def _gen():
-        import json as _json
+    # Use a queue so run_benchmark (running in a thread) can push progress
+    # events to the SSE generator in real time.
+    msg_queue: queue.Queue = queue.Queue()
+
+    def _cb(msg: str):
+        msg_queue.put(("progress", msg))
+
+    def _worker():
         try:
-            messages = []
-            def _cb(msg):
-                messages.append(msg)
             result = run_benchmark(
-                report_text = report_text,
-                api_url     = API_BASE_URL,
-                progress_cb = _cb,
+                report_text=report_text,
+                api_url=API_BASE_URL,
+                progress_cb=_cb,
             )
-            for m in messages:
-                yield f"data: {_json.dumps({'type': 'progress', 'message': m})}\n\n"
-            bench_id = str(uuid.uuid4())
-            _reports[bench_id] = {
-                "html":            result["html"],
-                "report_text":     "",
-                "product_context": result.get("product_context", {}),
-                "competitors":     result.get("competitors", []),
-            }
-            yield f"data: {_json.dumps({'type': 'complete', 'report_id': bench_id})}\n\n"
+            msg_queue.put(("complete", result))
         except Exception as exc:
-            yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+            msg_queue.put(("error", str(exc)))
+
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
+
+    def _gen():
+        while True:
+            try:
+                event_type, payload = msg_queue.get(timeout=120)
+            except queue.Empty:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'Benchmark timed out'})}\n\n"
+                break
+
+            if event_type == "progress":
+                yield f"data: {json.dumps({'type': 'progress', 'message': payload})}\n\n"
+
+            elif event_type == "complete":
+                bench_id = str(uuid.uuid4())
+                _reports[bench_id] = {
+                    "html":            payload["html"],
+                    "report_text":     "",
+                    "product_context": payload.get("product_context", {}),
+                    "competitors":     payload.get("competitors", []),
+                }
+                yield f"data: {json.dumps({'type': 'complete', 'report_id': bench_id})}\n\n"
+                break
+
+            elif event_type == "error":
+                yield f"data: {json.dumps({'type': 'error', 'message': payload})}\n\n"
+                break
 
     return Response(
         _gen(),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
