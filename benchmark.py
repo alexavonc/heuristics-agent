@@ -38,6 +38,7 @@ import httpx
 from anthropic import Anthropic
 from bs4 import BeautifulSoup
 from PIL import Image
+from playwright.sync_api import sync_playwright
 
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
@@ -266,6 +267,146 @@ def _screenshot_url(url: str) -> bytes | None:
     return None
 
 
+# ── Step 5a.5: URL verification ──────────────────────────────────────────────
+
+def _verify_url(url: str) -> tuple[bool, str]:
+    """Check if URL is actually reachable. Returns (reachable, final_url)."""
+    if not url or not url.startswith("http"):
+        return False, url
+    try:
+        resp = httpx.head(url, headers=_HEADERS, timeout=10, follow_redirects=True)
+        if resp.status_code < 400:
+            return True, str(resp.url)
+    except Exception:
+        pass
+    try:
+        resp = httpx.get(url, headers=_HEADERS, timeout=10, follow_redirects=True)
+        if resp.status_code < 400:
+            return True, str(resp.url)
+    except Exception:
+        pass
+    return False, url
+
+
+def _find_correct_url(name: str, bad_url: str, region: str) -> str | None:
+    """When a URL is unreachable, search DDG for the real website."""
+    results = _search_ddg(f"{name} official website {region}", max_results=5)
+    if not results:
+        return None
+    results_text = "\n".join(f"- {r['title']}: {r['url']}" for r in results[:5])
+    prompt = f"""The URL {bad_url} for "{name}" is unreachable.
+Search results for "{name}":
+{results_text}
+
+Which URL is most likely the correct official website for "{name}"?
+Return ONLY the URL. If unsure, return: SKIP"""
+    try:
+        resp = _client().messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=100,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        candidate = resp.content[0].text.strip()
+        if candidate == "SKIP" or not candidate.startswith("http"):
+            return None
+        return candidate
+    except Exception:
+        return None
+
+
+# ── Login-based Playwright capture (exported for app.py) ─────────────────────
+
+def capture_with_login(
+    entry_url: str,
+    username: str,
+    password: str,
+    workflow_tasks: list[dict],
+    workflow_name: str,
+) -> list[dict]:
+    """
+    Use Playwright to log in to a site and capture workflow screenshots.
+    Returns list of step dicts with 'screenshot_bytes', 'label', 'url'.
+    """
+    steps: list[dict] = []
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(viewport={"width": 1440, "height": 900})
+            page = ctx.new_page()
+
+            page.goto(entry_url, timeout=30000, wait_until="networkidle")
+
+            # Fill username/email
+            for sel in [
+                'input[type="email"]', 'input[name="email"]',
+                'input[name="username"]', 'input[name="login"]',
+                'input[id*="email" i]', 'input[id*="user" i]',
+                'input[placeholder*="email" i]', 'input[placeholder*="username" i]',
+            ]:
+                try:
+                    if page.locator(sel).count() > 0:
+                        page.fill(sel, username)
+                        break
+                except Exception:
+                    pass
+
+            # Fill password
+            for sel in ['input[type="password"]', 'input[name="password"]']:
+                try:
+                    if page.locator(sel).count() > 0:
+                        page.fill(sel, password)
+                        break
+                except Exception:
+                    pass
+
+            # Submit
+            for sel in [
+                'button[type="submit"]', 'input[type="submit"]',
+                'button:has-text("Login")', 'button:has-text("Sign in")',
+                'button:has-text("Log in")', 'button:has-text("Sign In")',
+            ]:
+                try:
+                    if page.locator(sel).count() > 0:
+                        page.click(sel)
+                        page.wait_for_load_state("networkidle", timeout=15000)
+                        break
+                except Exception:
+                    pass
+
+            # Screenshot post-login state
+            steps.append({
+                "step_num": 0,
+                "label": "Post-login",
+                "screenshot_bytes": page.screenshot(full_page=True),
+                "url": page.url,
+            })
+
+            # Navigate workflow tasks
+            links = _extract_links(page.content(), page.url)
+            visited = {page.url}
+            for i, task in enumerate(workflow_tasks, 1):
+                label = task.get("label", f"Step {i}")
+                chosen = _pick_link_for_task(links, task, "competitor", workflow_name)
+                if not chosen or chosen in visited:
+                    continue
+                visited.add(chosen)
+                try:
+                    page.goto(chosen, timeout=20000, wait_until="networkidle")
+                    steps.append({
+                        "step_num": i,
+                        "label": label,
+                        "screenshot_bytes": page.screenshot(full_page=True),
+                        "url": page.url,
+                    })
+                except Exception:
+                    pass
+
+            browser.close()
+    except Exception as e:
+        print(f"  capture_with_login error: {e}")
+    return steps
+
+
 # ── Step 5b: agentic competitor capture ──────────────────────────────────────
 
 def _extract_links(html: str, base_url: str) -> list[dict]:
@@ -423,6 +564,7 @@ def generate_benchmark_html(
     competitors: list[dict],
     workflow: dict,
     api_url: str = "",
+    workflow_tasks: list[dict] | None = None,
 ) -> str:
     product_type = context.get("product_type", "")
     industry     = context.get("industry", "")
@@ -431,12 +573,13 @@ def generate_benchmark_html(
 
     # ── competitor sections ──
     comp_html = ""
-    for comp in competitors:
+    for ci, comp in enumerate(competitors):
         name      = comp.get("name", "Competitor")
         comp_url  = comp.get("url", "")
         comp_type = comp.get("type", "global")
         steps     = comp.get("steps", [])
         rationale = comp.get("rationale", "")
+        comp_id   = f"comp-{ci}"
 
         badge_cls = {
             "direct":   "badge-direct",
@@ -459,6 +602,16 @@ def generate_benchmark_html(
                 f"&#128269; Analyse this competitor</button>"
             )
 
+        login_btn = ""
+        if comp_url:
+            safe_url = comp_url.replace("'", "\\'")
+            safe_name = name.replace("'", "\\'")
+            login_btn = (
+                f'<button class="login-btn" '
+                f"onclick=\"openLoginModal('{comp_id}', '{safe_url}', '{safe_name}')\">"
+                f"&#128272; Provide login</button>"
+            )
+
         comp_html += f"""
 <section class="comp-block">
   <div class="comp-header">
@@ -467,8 +620,9 @@ def generate_benchmark_html(
     {f'<a href="{comp_url}" target="_blank" class="comp-url">{comp_url}</a>' if comp_url else ''}
     <span class="rationale">{rationale}</span>
     {analyze_btn}
+    {login_btn}
   </div>
-  <div class="steps-row">{cards_html}</div>
+  <div class="steps-row" id="steps-{comp_id}">{cards_html}</div>
 </section>"""
 
     analyze_js = ""
@@ -480,6 +634,8 @@ def generate_benchmark_html(
   }}"""
 
     n_comps = len(competitors)
+    wf_tasks_json = json.dumps(workflow_tasks or [])
+    wf_name_js = wf_name.replace("'", "\\'")
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -531,6 +687,11 @@ def generate_benchmark_html(
                     border-radius: 6px; font-size: .78rem; font-weight: 600;
                     color: #1e293b; cursor: pointer; white-space: nowrap; }}
     .analyze-btn:hover {{ background: #e2e8f0; }}
+    .login-btn  {{ padding: .3rem .75rem;
+                   background: #eff6ff; border: 1.5px solid #bfdbfe;
+                   border-radius: 6px; font-size: .78rem; font-weight: 600;
+                   color: #1d4ed8; cursor: pointer; white-space: nowrap; }}
+    .login-btn:hover {{ background: #dbeafe; }}
     .steps-row {{ display: flex; flex-wrap: nowrap; gap: 1rem;
                   overflow-x: auto; padding-bottom: .5rem; }}
     .step-card  {{ flex: 0 0 220px; }}
@@ -547,6 +708,35 @@ def generate_benchmark_html(
                    align-items: center; justify-content: center; cursor: zoom-out; }}
     #zoom-modal.open {{ display: flex; }}
     #zoom-img {{ max-width: 94vw; max-height: 94vh; border-radius: 8px; object-fit: contain; }}
+    /* Login modal */
+    #login-modal {{ display: none; position: fixed; inset: 0; z-index: 10000;
+                    background: rgba(0,0,0,.6); align-items: center; justify-content: center; }}
+    #login-modal.open {{ display: flex; }}
+    .login-box  {{ background: white; border-radius: 14px; padding: 2rem;
+                   width: 420px; max-width: 95vw;
+                   box-shadow: 0 20px 60px rgba(0,0,0,.3); }}
+    .login-box h3 {{ font-size: 1rem; font-weight: 700; margin-bottom: .35rem; }}
+    .login-box .login-site {{ font-size: .78rem; color: #6366f1; margin-bottom: 1.1rem;
+                              word-break: break-all; }}
+    .login-box label {{ display: block; font-size: .78rem; font-weight: 600;
+                        color: #475569; margin-bottom: .2rem; }}
+    .login-box input[type="text"],
+    .login-box input[type="password"] {{
+      width: 100%; padding: .55rem .75rem; border: 1.5px solid #e2e8f0;
+      border-radius: 8px; font-size: .9rem; margin-bottom: .9rem;
+      outline: none; transition: border-color .15s; }}
+    .login-box input:focus {{ border-color: #6366f1; }}
+    .login-actions {{ display: flex; gap: .65rem; margin-top: .5rem; }}
+    .login-actions button {{ flex: 1; padding: .55rem; border-radius: 8px;
+                             font-size: .85rem; font-weight: 600; cursor: pointer;
+                             border: none; }}
+    .login-submit {{ background: #4f46e5; color: white; }}
+    .login-submit:hover {{ background: #4338ca; }}
+    .login-cancel {{ background: #f1f5f9; color: #64748b; }}
+    .login-cancel:hover {{ background: #e2e8f0; }}
+    .login-status {{ font-size: .8rem; color: #64748b; margin-top: .75rem;
+                     min-height: 1.2em; text-align: center; }}
+    .login-status.error {{ color: #b91c1c; }}
   </style>
 </head>
 <body>
@@ -570,10 +760,35 @@ def generate_benchmark_html(
     </div>
     {comp_html}
   </main>
+
+  <!-- Zoom modal -->
   <div id="zoom-modal" onclick="closeZoom()">
     <img id="zoom-img" src="" alt="" />
   </div>
+
+  <!-- Login credential modal -->
+  <div id="login-modal">
+    <div class="login-box">
+      <h3>&#128272; Provide login credentials</h3>
+      <div class="login-site" id="login-site-url"></div>
+      <label for="login-user">Email / Username</label>
+      <input id="login-user" type="text" placeholder="you@example.com" autocomplete="username" />
+      <label for="login-pass">Password</label>
+      <input id="login-pass" type="password" placeholder="Password" autocomplete="current-password" />
+      <div class="login-actions">
+        <button class="login-submit" onclick="submitLogin()">Capture with login</button>
+        <button class="login-cancel" onclick="closeLoginModal()">Cancel</button>
+      </div>
+      <div class="login-status" id="login-status"></div>
+    </div>
+  </div>
+
   <script>
+  const WORKFLOW_TASKS = {wf_tasks_json};
+  const WORKFLOW_NAME  = '{wf_name_js}';
+  let _loginCompId = null;
+  let _loginUrl    = null;
+
   function openZoom(src) {{
     document.getElementById('zoom-img').src = src;
     document.getElementById('zoom-modal').classList.add('open');
@@ -581,7 +796,77 @@ def generate_benchmark_html(
   function closeZoom() {{
     document.getElementById('zoom-modal').classList.remove('open');
   }}
-  document.addEventListener('keydown', function(e) {{ if (e.key === 'Escape') closeZoom(); }});
+
+  function openLoginModal(compId, url, name) {{
+    _loginCompId = compId;
+    _loginUrl    = url;
+    document.getElementById('login-site-url').textContent = url;
+    document.getElementById('login-user').value  = '';
+    document.getElementById('login-pass').value  = '';
+    document.getElementById('login-status').textContent = '';
+    document.getElementById('login-status').className   = 'login-status';
+    document.getElementById('login-modal').classList.add('open');
+    setTimeout(() => document.getElementById('login-user').focus(), 50);
+  }}
+  function closeLoginModal() {{
+    document.getElementById('login-modal').classList.remove('open');
+  }}
+
+  function submitLogin() {{
+    const username = document.getElementById('login-user').value.trim();
+    const password = document.getElementById('login-pass').value;
+    const status   = document.getElementById('login-status');
+
+    if (!username) {{
+      status.className   = 'login-status error';
+      status.textContent = 'Please enter an email or username.';
+      return;
+    }}
+
+    status.className   = 'login-status';
+    status.textContent = 'Logging in and capturing screenshots\u2026 this may take 30\u201360 seconds.';
+
+    fetch('/api/benchmark/login-capture', {{
+      method: 'POST',
+      headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{
+        comp_url:       _loginUrl,
+        username:       username,
+        password:       password,
+        workflow_tasks: WORKFLOW_TASKS,
+        workflow_name:  WORKFLOW_NAME,
+      }})
+    }})
+    .then(r => r.json())
+    .then(data => {{
+      if (data.error) {{
+        status.className   = 'login-status error';
+        status.textContent = 'Error: ' + data.error;
+        return;
+      }}
+      const stepsRow = document.getElementById('steps-' + _loginCompId);
+      if (stepsRow && data.steps && data.steps.length) {{
+        stepsRow.innerHTML = data.steps.map(s => {{
+          const img = s.screenshot_b64
+            ? '<img src="data:image/png;base64,' + s.screenshot_b64 + '" loading="lazy" onclick="openZoom(this.src)" />'
+            : '<p class="empty-msg">No screenshot captured.</p>';
+          const urlChip = s.url
+            ? '<a href="' + s.url + '" target="_blank" class="step-url">' + s.url.substring(0,60) + (s.url.length>60?'\u2026':'') + '</a>'
+            : '';
+          return '<div class="step-card"><div class="step-label">' + (s.label||'') + '</div>' + urlChip + img + '</div>';
+        }}).join('');
+      }}
+      closeLoginModal();
+    }})
+    .catch(err => {{
+      status.className   = 'login-status error';
+      status.textContent = 'Request failed: ' + err;
+    }});
+  }}
+
+  document.addEventListener('keydown', function(e) {{
+    if (e.key === 'Escape') {{ closeZoom(); closeLoginModal(); }}
+  }});
   {analyze_js}
   </script>
 </body>
@@ -638,6 +923,33 @@ def run_benchmark(
     names = [c.get("name", "?") for c in competitors]
     _p(f"Selected {len(competitors)} competitors: {', '.join(names)}")
 
+    # 4b ── verify competitor URLs actually exist
+    _p("Verifying competitor URLs are reachable…")
+    for comp in competitors:
+        comp_url = comp.get("url", "")
+        comp_name = comp.get("name", "?")
+        if not comp_url:
+            continue
+        ok, final_url = _verify_url(comp_url)
+        if ok:
+            if final_url != comp_url:
+                _p(f"  {comp_name}: redirects to {final_url}")
+                comp["url"] = final_url
+        else:
+            _p(f"  {comp_name}: {comp_url} unreachable — searching for correct URL…")
+            fixed = _find_correct_url(comp_name, comp_url, context.get("region", ""))
+            if fixed:
+                ok2, final_url2 = _verify_url(fixed)
+                if ok2:
+                    _p(f"  {comp_name}: found working URL {final_url2}")
+                    comp["url"] = final_url2
+                else:
+                    _p(f"  {comp_name}: alternative URL also unreachable, skipping")
+                    comp["url"] = ""
+            else:
+                _p(f"  {comp_name}: no alternative found, skipping")
+                comp["url"] = ""
+
     # 5 ── capture each competitor
     wf_name = workflow.get("name", "workflow")
     for i, comp in enumerate(competitors, 1):
@@ -654,7 +966,7 @@ def run_benchmark(
 
     # 6 ── build HTML
     _p("Building benchmark report…")
-    html = generate_benchmark_html(context, competitors, workflow, api_url)
+    html = generate_benchmark_html(context, competitors, workflow, api_url, workflow_tasks)
 
     clean_competitors = [
         {k: v for k, v in c.items() if k != "steps"}

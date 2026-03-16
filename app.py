@@ -16,7 +16,7 @@ from analyze import (
     GENERAL_CHAT_SYSTEM_PROMPT,
     _safe_bytes,
 )
-from benchmark import run_benchmark
+from benchmark import run_benchmark, capture_with_login, _to_png_b64
 
 app = Flask(__name__)
 CORS(app)
@@ -235,6 +235,38 @@ def api_benchmark():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Benchmark: login-based re-capture ────────────────────────────
+@app.route("/api/benchmark/login-capture", methods=["POST"])
+def api_login_capture():
+    """
+    Body: { comp_url, username, password, workflow_tasks, workflow_name }
+    Returns: { steps: [{label, url, screenshot_b64}] }
+    """
+    data           = request.get_json(force=True)
+    comp_url       = data.get("comp_url", "")
+    username       = data.get("username", "")
+    password       = data.get("password", "")
+    workflow_tasks = data.get("workflow_tasks", [])
+    workflow_name  = data.get("workflow_name", "workflow")
+
+    if not comp_url or not username:
+        return jsonify({"error": "comp_url and username are required"}), 400
+
+    try:
+        steps = capture_with_login(comp_url, username, password, workflow_tasks, workflow_name)
+        result = []
+        for s in steps:
+            sb = s.get("screenshot_bytes")
+            result.append({
+                "label":          s.get("label", ""),
+                "url":            s.get("url", ""),
+                "screenshot_b64": _to_png_b64(sb) if sb else None,
+            })
+        return jsonify({"steps": result})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
