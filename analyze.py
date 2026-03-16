@@ -1708,6 +1708,148 @@ def run_journey_from_screenshots(step_paths: list[str]):
     else:
         print("\n  HTML report saved → journey_report.html")
         print("  Text report saved → journey_report.txt")
+# ── API-friendly wrappers (used by app.py) ───────────────────────
+def analyze_url(url: str, api_url: str = None) -> dict:
+    desktop_report, desktop_png, desktop_locs = _analyze_viewport(url, DESKTOP_VIEWPORT, "Desktop")
+    mobile_report,  mobile_png,  mobile_locs  = _analyze_viewport(url, MOBILE_VIEWPORT,  "Mobile")
+    html = generate_html(
+        url,
+        desktop_report, desktop_png, desktop_locs,
+        mobile_report,  mobile_png,  mobile_locs,
+    )
+    report_text = (
+        f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
+        f"=== MOBILE VIEWPORT ===\n{mobile_report}"
+    )
+    return {
+        "html":           html,
+        "report_text":    report_text,
+        "desktop_score":  _extract_score(desktop_report),
+        "mobile_score":   _extract_score(mobile_report),
+        "desktop_locs":   desktop_locs,
+        "mobile_locs":    mobile_locs,
+    }
+
+
+def analyze_journey(url: str, steps: list[dict], api_url: str = None) -> dict:
+    desktop_steps, desktop_report, desktop_locs = _analyze_journey_viewport(url, steps, DESKTOP_VIEWPORT, "Desktop")
+    mobile_steps,  mobile_report,  mobile_locs  = _analyze_journey_viewport(url, steps, MOBILE_VIEWPORT,  "Mobile")
+    html = generate_journey_html(
+        url,
+        desktop_steps, desktop_report, desktop_locs,
+        mobile_steps,  mobile_report,  mobile_locs,
+    )
+    report_text = (
+        f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
+        f"=== MOBILE VIEWPORT ===\n{mobile_report}"
+    )
+    return {
+        "html":           html,
+        "report_text":    report_text,
+        "desktop_score":  _extract_score(desktop_report),
+        "mobile_score":   _extract_score(mobile_report),
+        "desktop_locs":   desktop_locs,
+        "mobile_locs":    mobile_locs,
+    }
+
+
+def analyze_screenshots(desktop_bytes: bytes, mobile_bytes: bytes = None, api_url: str = None) -> dict:
+    desktop_png = _to_png(desktop_bytes)
+    desktop_report, desktop_locs = parse_response(call_claude_screenshot(desktop_png, "desktop"))
+    desktop_annotated, _ = annotate_screenshot_from_locs(desktop_png, desktop_locs)
+    if mobile_bytes:
+        mobile_png = _to_png(mobile_bytes)
+        mobile_report, mobile_locs = parse_response(call_claude_screenshot(mobile_png, "mobile"))
+        mobile_annotated, _ = annotate_screenshot_from_locs(mobile_png, mobile_locs)
+    else:
+        mobile_report    = "(No mobile screenshot provided.)"
+        mobile_annotated = desktop_annotated
+        mobile_locs      = []
+    html = generate_html(
+        "Uploaded Screenshots",
+        desktop_report, desktop_annotated, desktop_locs,
+        mobile_report,  mobile_annotated,  mobile_locs,
+    )
+    report_text = (
+        f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
+        f"=== MOBILE VIEWPORT ===\n{mobile_report}"
+    )
+    return {
+        "html":           html,
+        "report_text":    report_text,
+        "desktop_score":  _extract_score(desktop_report),
+        "mobile_score":   _extract_score(mobile_report),
+        "score":          _extract_score(desktop_report),
+        "desktop_locs":   desktop_locs,
+        "mobile_locs":    mobile_locs,
+    }
+
+
+def _call_claude_journey_screenshots_bytes(step_images: list[bytes], viewport_label: str = "desktop") -> str:
+    print(f"  Sending {len(step_images)}-step {viewport_label} screenshot journey to Claude ...")
+    client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
+    content_blocks: list = [{
+        "type": "text",
+        "text": (
+            f"I am providing a {len(step_images)}-step user journey ({viewport_label} viewport) "
+            f"as screenshots, in order. Please evaluate the entire flow end-to-end.\n\n"
+        ),
+    }]
+    for i, img_bytes in enumerate(step_images):
+        img = Image.open(io.BytesIO(_to_png(img_bytes))).convert("RGB")
+        img.thumbnail((900, 900), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=60, optimize=True)
+        img_b64 = base64.standard_b64encode(buf.getvalue()).decode()
+        content_blocks.append({"type": "text", "text": f"--- STEP {i} ---\nScreenshot:"})
+        content_blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64}})
+    content_blocks.append({"type": "text", "text": "Please evaluate this complete user journey against Nielsen's 10 heuristics."})
+    with client.messages.stream(
+        model="claude-sonnet-4-6",
+        max_tokens=8192,
+        system=JOURNEY_HEURISTICS_PROMPT,
+        messages=[{"role": "user", "content": content_blocks}],
+    ) as stream:
+        chunks = []
+        for text in stream.text_stream:
+            chunks.append(text)
+        return "".join(chunks)
+
+
+def analyze_journey_screenshots(step_images: list[bytes], api_url: str = None) -> dict:
+    full_response = _call_claude_journey_screenshots_bytes(step_images)
+    report_text, locations = parse_response(full_response)
+    locs_by_step = defaultdict(list)
+    for loc in locations:
+        locs_by_step[loc.get("step_num", 0)].append(loc)
+    steps_data = []
+    for i, img_bytes in enumerate(step_images):
+        png = _to_png(img_bytes)
+        step_locs = locs_by_step.get(i, [])
+        annotated, found = annotate_screenshot_from_locs(png, step_locs)
+        steps_data.append({
+            "step_num":         i,
+            "label":            f"Step {i + 1}",
+            "url":              f"step_{i}",
+            "screenshot_bytes": annotated,
+            "issue_crops":      crop_to_issue_regions(annotated, found),
+        })
+    html = generate_journey_html(
+        "Uploaded Screenshots",
+        steps_data, report_text, locations,
+        steps_data, report_text, locations,
+    )
+    return {
+        "html":           html,
+        "report_text":    report_text,
+        "desktop_score":  _extract_score(report_text),
+        "mobile_score":   None,
+        "score":          _extract_score(report_text),
+        "desktop_locs":   locations,
+        "mobile_locs":    [],
+    }
+
+
 # ── Main ─────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("\n=== Heuristic Funnel Analyzer ===")
