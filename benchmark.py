@@ -64,12 +64,18 @@ Rules:
 
 def _capture_screenshot(url: str) -> bytes | None:
     """Capture a 1440×900 above-the-fold screenshot. Returns PNG bytes or None."""
+    import shutil
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
-            )
+            # Use system chromium if Playwright's own browser isn't downloaded (e.g. Railway)
+            system_chromium = shutil.which("chromium") or shutil.which("chromium-browser")
+            launch_kwargs: dict = {
+                "headless": True,
+                "args": ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            }
+            if system_chromium:
+                launch_kwargs["executable_path"] = system_chromium
+            browser = p.chromium.launch(**launch_kwargs)
             ctx = browser.new_context(
                 viewport={"width": 1440, "height": 900},
                 user_agent=(
