@@ -2,4 +2,4 @@
 nixPkgs = ["chromium"]
 
 [phases.build]
-cmds = ["pip install -r requirements.txt", "playwright install chromium --with-deps || true"]
+cmds = ["pip install -r requirements.txt", "playwright install chromium --with-deps"]
