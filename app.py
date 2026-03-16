@@ -14,6 +14,7 @@ from analyze import (
     GENERAL_CHAT_SYSTEM_PROMPT,
     _safe_bytes,
 )
+from benchmark import run_benchmark
 
 app = Flask(__name__)
 CORS(app)
@@ -166,6 +167,70 @@ def chat():
             for text in stream.text_stream:
                 yield f"data: {json.dumps({'text': text})}\n\n"
         yield "data: [DONE]\n\n"
+
+    return Response(
+        _gen(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Benchmark (SSE stream) ─────────────────────────────────────────
+@app.route("/api/benchmark", methods=["POST"])
+def api_benchmark():
+    """
+    Body (JSON):
+      { "report_id": "..." }
+    Returns: text/event-stream
+      data: {"type": "progress", "message": "..."}   (0-N times)
+      data: {"type": "complete", "report_id": "..."}  (once, on success)
+      data: {"type": "error",    "message": "..."}    (once, on failure)
+    """
+    data      = request.get_json(force=True)
+    report_id = data.get("report_id", "")
+
+    report = _reports.get(report_id)
+    if not report:
+        return jsonify({"error": "Report not found"}), 404
+
+    report_text = report.get("report_text", "")
+    if not report_text:
+        return jsonify({"error": "No report text available for benchmarking"}), 400
+
+    def _gen():
+        import json as _json
+
+        def _prog(msg: str):
+            yield f"data: {_json.dumps({'type': 'progress', 'message': msg})}\n\n"
+
+        try:
+            messages = []
+
+            def _cb(msg):
+                messages.append(msg)
+
+            result = run_benchmark(
+                report_text = report_text,
+                api_url     = API_BASE_URL,
+                progress_cb = _cb,
+            )
+            # Yield any buffered progress messages (run_benchmark is synchronous,
+            # so we flush them all at once after it completes — the client will
+            # show them in order before the "complete" event.)
+            for m in messages:
+                yield f"data: {_json.dumps({'type': 'progress', 'message': m})}\n\n"
+
+            bench_id = str(uuid.uuid4())
+            _reports[bench_id] = {
+                "html":            result["html"],
+                "report_text":     "",   # no chattable text for benchmark reports
+                "product_context": result.get("product_context", {}),
+                "competitors":     result.get("competitors", []),
+            }
+            yield f"data: {_json.dumps({'type': 'complete', 'report_id': bench_id})}\n\n"
+
+        except Exception as exc:
+            yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
     return Response(
         _gen(),

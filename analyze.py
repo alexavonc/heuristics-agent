@@ -1363,6 +1363,153 @@ def _modal_html() -> str:
 })();
 </script>
 """
+def _bench_panel_html(api_url: str) -> str:
+    """Benchmark progress panel + JS wired to #open-bench-btn."""
+    return f"""
+  <!-- ── Benchmark panel ── -->
+  <div id="bench-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1998;"></div>
+  <div id="bench-panel" style="display:none;position:fixed;right:0;top:0;width:420px;max-width:100vw;
+       height:100vh;background:#fff;box-shadow:-4px 0 28px rgba(0,0,0,.18);z-index:1999;
+       flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+    <div style="background:#0f172a;color:#f8fafc;padding:1rem 1.25rem;display:flex;
+         justify-content:space-between;align-items:flex-start;flex-shrink:0;">
+      <div>
+        <div style="font-weight:700;font-size:.95rem;">&#128202; Benchmark competitors</div>
+        <div style="font-size:.72rem;color:#94a3b8;margin-top:.2rem;">
+          Identifies your product type, finds competitors, captures their flows
+        </div>
+      </div>
+      <button id="bp-close" style="flex-shrink:0;margin-left:.75rem;background:none;border:none;
+              color:#94a3b8;font-size:1.5rem;line-height:1;cursor:pointer;padding:0;">&times;</button>
+    </div>
+    <div style="padding:1.25rem;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.75rem;">
+      <div id="bp-intro" style="font-size:.85rem;color:#475569;line-height:1.6;">
+        This will:<br/>
+        &nbsp;1. Identify the product type and workflows from this report<br/>
+        &nbsp;2. Search the web for regional &amp; global competitors<br/>
+        &nbsp;3. Capture screenshots of their relevant flows using Playwright + Claude<br/>
+        &nbsp;4. Search Mobbin for matching design patterns<br/><br/>
+        <em>Takes 1–3 minutes depending on how many competitors are found.</em>
+      </div>
+      <div id="bp-log" style="display:none;flex-direction:column;gap:.4rem;"></div>
+      <div id="bp-spinner" style="display:none;align-items:center;gap:.6rem;font-size:.84rem;color:#6366f1;font-weight:600;">
+        <span style="width:16px;height:16px;border:2px solid #c7d2fe;border-top-color:#6366f1;
+              border-radius:50%;animation:bp-spin 0.7s linear infinite;flex-shrink:0;"></span>
+        <span id="bp-spinner-txt">Running…</span>
+      </div>
+    </div>
+    <div style="padding:.75rem 1.25rem;border-top:1px solid #e2e8f0;flex-shrink:0;background:#fff;">
+      <button id="bp-run-btn" style="width:100%;padding:.6rem 1rem;background:#0f172a;color:#fff;
+              border:none;border-radius:8px;font-size:.9rem;font-weight:700;cursor:pointer;
+              transition:background .15s;">
+        &#9654; Run benchmark
+      </button>
+    </div>
+  </div>
+  <style>
+    @keyframes bp-spin {{ to {{ transform: rotate(360deg); }} }}
+  </style>
+  <script>
+  (function(){{
+    var _benchApiUrl = '{api_url}';
+    var _benchRunning = false;
+
+    function _bpEl(id) {{ return document.getElementById(id); }}
+
+    function openBench() {{
+      _bpEl('bench-overlay').style.display = 'block';
+      _bpEl('bench-panel').style.display   = 'flex';
+    }}
+    function closeBench() {{
+      if (_benchRunning) return;
+      _bpEl('bench-overlay').style.display = 'none';
+      _bpEl('bench-panel').style.display   = 'none';
+    }}
+
+    function _addLog(msg, done) {{
+      var log = _bpEl('bp-log');
+      log.style.display = 'flex';
+      var row = document.createElement('div');
+      row.style.cssText = 'font-size:.8rem;color:' + (done ? '#16a34a' : '#475569') + ';display:flex;gap:.4rem;align-items:flex-start;';
+      row.innerHTML = (done ? '&#10003;' : '&#8250;') + ' ' + msg;
+      log.appendChild(row);
+      log.scrollTop = log.scrollHeight;
+    }}
+
+    async function runBenchmark() {{
+      if (_benchRunning) return;
+      var reportId = window.location.pathname.split('/').filter(Boolean).pop() || '';
+      if (!reportId) {{ alert('Could not determine report ID.'); return; }}
+
+      _benchRunning = true;
+      _bpEl('bp-intro').style.display    = 'none';
+      _bpEl('bp-run-btn').disabled       = true;
+      _bpEl('bp-run-btn').textContent    = 'Running…';
+      _bpEl('bp-spinner').style.display  = 'flex';
+      _bpEl('bp-log').style.display      = 'flex';
+
+      try {{
+        var resp = await fetch(_benchApiUrl + '/api/benchmark', {{
+          method:  'POST',
+          headers: {{'Content-Type': 'application/json'}},
+          body:    JSON.stringify({{report_id: reportId}}),
+        }});
+
+        var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
+        for (;;) {{
+          var r = await reader.read();
+          if (r.done) break;
+          buf += dec.decode(r.value, {{stream: true}});
+          var lines = buf.split('\\n');
+          buf = lines.pop();
+          for (var i = 0; i < lines.length; i++) {{
+            var ln = lines[i];
+            if (!ln.startsWith('data: ')) continue;
+            var chunk = ln.slice(6).trim();
+            try {{
+              var evt = JSON.parse(chunk);
+              if (evt.type === 'progress') {{
+                _addLog(evt.message, false);
+                _bpEl('bp-spinner-txt').textContent = evt.message;
+              }} else if (evt.type === 'complete') {{
+                _addLog('Benchmark complete — opening report…', true);
+                _bpEl('bp-spinner').style.display = 'none';
+                _bpEl('bp-run-btn').textContent   = '&#10003; Done — report opened';
+                window.open(_benchApiUrl + '/api/report/' + evt.report_id, '_blank');
+              }} else if (evt.type === 'error') {{
+                _addLog('Error: ' + evt.message, false);
+                _bpEl('bp-spinner').style.display = 'none';
+                _bpEl('bp-run-btn').disabled       = false;
+                _bpEl('bp-run-btn').textContent    = 'Retry benchmark';
+                _benchRunning = false;
+              }}
+            }} catch(ex) {{}}
+          }}
+        }}
+      }} catch(err) {{
+        _addLog('Network error: ' + err.message, false);
+        _bpEl('bp-spinner').style.display = 'none';
+        _bpEl('bp-run-btn').disabled       = false;
+        _bpEl('bp-run-btn').textContent    = 'Retry benchmark';
+        _benchRunning = false;
+      }}
+    }}
+
+    document.addEventListener('click', function(e) {{
+      var t = e.target;
+      if (t === _bpEl('bench-overlay'))      {{ closeBench(); return; }}
+      if (t.closest && t.closest('#bp-close'))      {{ closeBench(); return; }}
+      if (t.closest && t.closest('#open-bench-btn')) {{ openBench(); return; }}
+      if (t.closest && t.closest('#bp-run-btn'))     {{ runBenchmark(); return; }}
+    }});
+    document.addEventListener('keydown', function(e) {{
+      if (e.key === 'Escape') closeBench();
+    }});
+  }})();
+  </script>
+"""
+
+
 def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_url: str = None) -> str:
     ask_btn = (
         """<button id="open-chat-btn" style="display:flex;align-items:center;gap:.4rem;"""
@@ -1370,6 +1517,15 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
         """font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" """
         """onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">"""
         """&#128172; Ask Claude</button>"""
+    ) if api_url else ""
+    bench_btn = (
+        """<button id="open-bench-btn" style="display:flex;align-items:center;gap:.4rem;"""
+        """padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;"""
+        """border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;"""
+        """transition:border-color .15s,color .15s;" """
+        """onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" """
+        """onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">"""
+        """&#128202; Benchmark competitors</button>"""
     ) if api_url else ""
     new_btn = (
         """<a href="/" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;"""
@@ -1379,8 +1535,9 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
         """onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" """
         """onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>"""
     )
-    right_btns = f'<div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;">{ask_btn}{new_btn}</div>'
+    right_btns = f'<div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;">{ask_btn}{bench_btn}{new_btn}</div>'
     chat_panel = _chat_panel_html(api_url) if api_url else ""
+    bench_panel = _bench_panel_html(api_url) if api_url else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1456,6 +1613,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
   <main>{body}
   </main>
   {chat_panel}
+  {bench_panel}
   {_modal_html()}
 </body>
 </html>"""
