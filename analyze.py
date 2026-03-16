@@ -6,12 +6,21 @@ import re
 import base64
 import io
 import html as _html_mod
+import shutil
+import socket
+import threading
+import webbrowser
 from collections import defaultdict
 urllib3.disable_warnings()
 import anthropic
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 from PIL import Image, ImageDraw, ImageFont
+try:
+    from flask import Flask, request, Response
+    _FLASK_OK = True
+except ImportError:
+    _FLASK_OK = False
 # ── Configuration ────────────────────────────────────────────────
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 if not API_KEY:
@@ -31,8 +40,10 @@ SEVERITY_HEX = {
     "Low":      "#2563eb",
 }
 HEURISTICS_PROMPT = """\
-You are a senior UX researcher conducting a Nielsen heuristic evaluation.
-Nielsen's 10 Heuristics for reference:
+You are a senior UX researcher conducting a heuristic evaluation.
+
+PART 1 — Nielsen's 10 Heuristics
+Evaluate the page against all 10 heuristics:
 1. Visibility of system status
 2. Match between system and the real world
 3. User control and freedom
@@ -43,26 +54,31 @@ Nielsen's 10 Heuristics for reference:
 8. Aesthetic and minimalist design
 9. Help users recognize, diagnose, and recover from errors
 10. Help and documentation
-You have been given extracted content from a sales funnel page.
-Evaluate it against these heuristics and produce a clear report.
-For each issue found, use EXACTLY this format:
+For each issue found, provide:
+- Which heuristic is violated (number + name)
+- Where exactly on the page the issue occurs
+- What the specific problem is
+- A concrete recommendation to fix it
+- Severity: Critical / High / Medium / Low
 
-### Issue N: [short title]
-**Heuristic:** #[number] – [name]
-**Problem:** [specific description of the problem]
-**Recommendation:** [concrete actionable fix]
-**Severity:** Critical / High / Medium / Low
+PART 2 — CTA Effectiveness
+Identify every call-to-action on the page (buttons, links, form submits) and assess:
+- Action language: is it specific and benefit-led (e.g. "Start Free Trial") or vague (e.g. "Submit")?
+- Visual prominence: size, colour contrast, above/below fold placement
+- Decision paralysis: are there too many competing CTAs?
+- Missing CTAs: where would a user expect to act next but can't?
+Rate overall CTA effectiveness: Strong / Adequate / Weak, with a one-sentence reason.
 
-Also list any strengths you observe.
-End with an overall score out of 10 using this rubric:
-- 9–10: Near-perfect — only minor polish needed; no significant usability blockers
-- 7–8: Good — functional with a few friction points that could hurt conversions
-- 5–6: Needs Work — notable violations affecting key flows; several issues to fix
-- 3–4: Poor — significant UX failures hurting conversions; major rework needed
-- 0–2: Critical — fundamental redesign required; core tasks are difficult or impossible
-Be strict: even 1 High severity issue should bring the score to 8 or below;
-2+ High severity issues should result in 6 or below.
-Give the score as "Overall Score: X/10" then a one-paragraph summary.
+PART 3 — Content Clarity
+- Value proposition: is it immediately clear what this product/service does and for whom?
+- Reading level: flag jargon, overly technical terms, or bureaucratic language
+- Headline hierarchy: does H1→H2→H3 guide the reader logically toward action?
+- Microcopy: evaluate placeholder text, error messages, labels, and helper text
+- Trust signals: note which are present and which are missing (testimonials, logos, security badges, stats)
+Rate overall content clarity: Strong / Adequate / Weak, with a one-sentence reason.
+
+List any strengths you observe across all three parts.
+End with an overall score out of 10 and a one-paragraph summary covering the top 3 priority improvements.
 Be specific. Reference the actual text, buttons, and labels you can see.
 Avoid generic advice — tie everything back to the exact content provided.
 IMPORTANT: After your full report, append a <LOCATIONS> block containing a JSON
@@ -72,10 +88,7 @@ array that maps each issue number to how to find it on the rendered page:
   {
     "issue_number": 1,
     "short_title": "4-6 word title",
-    "heuristic": "#4 – Consistency and standards",
     "severity": "High",
-    "problem": "One sentence describing the specific UX problem.",
-    "recommendation": "One sentence concrete fix.",
     "text_to_find": "exact short phrase visible on the page near the problem",
     "bbox_pct": {"x": 0.05, "y": 0.12, "w": 0.90, "h": 0.06}
   }
@@ -93,10 +106,11 @@ Rules for bbox_pct (REQUIRED — always provide this):
 - Be as precise as possible based on what you see
 """
 JOURNEY_HEURISTICS_PROMPT = """\
-You are a senior UX researcher conducting a Nielsen heuristic evaluation of a \
+You are a senior UX researcher conducting a heuristic evaluation of a \
 multi-step user journey. You will be given a series of screenshots and page \
 content captured at each step of the journey, in order.
-Nielsen's 10 Heuristics for reference:
+
+PART 1 — Nielsen's 10 Heuristics (evaluated across the full flow)
 1. Visibility of system status
 2. Match between system and the real world
 3. User control and freedom
@@ -107,30 +121,36 @@ Nielsen's 10 Heuristics for reference:
 8. Aesthetic and minimalist design
 9. Help users recognize, diagnose, and recover from errors
 10. Help and documentation
-Evaluate the ENTIRE FLOW end-to-end. For each issue found, use EXACTLY this format:
-
-### Issue N: [short title]
-**Step:** [step number(s)]
-**Heuristic:** #[number] – [name]
-**Problem:** [specific description of the problem]
-**Recommendation:** [concrete actionable fix]
-**Severity:** Critical / High / Medium / Low
+For each issue found, provide:
+- Which step(s) it occurs in (e.g. "Step 2 → Step 3")
+- Which heuristic is violated (number + name)
+- What the specific problem is
+- A concrete recommendation to fix it
+- Severity: Critical / High / Medium / Low
 Also evaluate:
 - Flow continuity: does each screen logically follow from the previous?
 - Progress visibility: does the user know where they are in the journey?
 - Drop-off risks: where are users most likely to abandon?
 - Cross-step consistency: do labels, tone, and design stay consistent?
-List any strengths you observe.
-End with an overall journey score out of 10 using this rubric:
-- 9–10: Near-perfect — only minor polish needed; no significant usability blockers
-- 7–8: Good — functional with a few friction points that could hurt conversions
-- 5–6: Needs Work — notable violations affecting key flows; several issues to fix
-- 3–4: Poor — significant UX failures hurting conversions; major rework needed
-- 0–2: Critical — fundamental redesign required; core tasks are difficult or impossible
-Be strict: even 1 High severity issue should bring the score to 8 or below;
-2+ High severity issues should result in 6 or below.
-Give the score as "Overall Score: X/10" then a paragraph summary of the \
-biggest friction points and quick wins.
+
+PART 2 — CTA Effectiveness across the journey
+For each step, identify the primary CTA and assess:
+- Action language: specific and benefit-led, or vague?
+- Visual prominence: is it the most visually dominant interactive element?
+- Momentum: does each CTA naturally carry the user to the next step, or does it create hesitation?
+- Missing CTAs: are there steps where the next action is unclear?
+Rate the journey's overall CTA progression: Strong / Adequate / Weak, with a one-sentence reason.
+
+PART 3 — Content Clarity across the journey
+- Value proposition continuity: is the core promise consistently reinforced at each step?
+- Reading level: flag jargon or unnecessarily complex language at any step
+- Microcopy quality: evaluate form labels, placeholder text, error states, and confirmation messages
+- Trust signals: where are they present, where are they absent but needed (especially pre-payment or pre-submission steps)?
+Rate overall content clarity: Strong / Adequate / Weak, with a one-sentence reason.
+
+List any strengths you observe across all three parts.
+End with an overall journey score out of 10 and a paragraph summary of the \
+top 3 priority improvements for conversion and usability.
 Be specific. Reference actual text, buttons, and labels you can see in the \
 screenshots. Tie everything back to the exact content provided.
 IMPORTANT: After your full report, append a <LOCATIONS> block containing a JSON
@@ -140,10 +160,7 @@ array that maps each issue to the specific step and text where it can be found:
   {
     "issue_number": 1,
     "short_title": "4-6 word title",
-    "heuristic": "#4 – Consistency and standards",
     "severity": "High",
-    "problem": "One sentence describing the specific UX problem.",
-    "recommendation": "One sentence concrete fix.",
     "step_num": 0,
     "text_to_find": "exact short phrase visible on that step's page",
     "bbox_pct": {"x": 0.05, "y": 0.12, "w": 0.90, "h": 0.06}
@@ -180,8 +197,61 @@ Full evaluation report:
 def _safe_bytes(s: str) -> bytes:
     """Encode string to UTF-8, replacing any un-encodable / surrogate chars."""
     return s.encode("utf-8", errors="replace")
+# ── Chat server ──────────────────────────────────────────────────
+_REPORT_CONTEXT: dict = {}
+if _FLASK_OK:
+    _flask_app = Flask(__name__)
+    @_flask_app.route("/report")
+    def _serve_report():
+        html = _REPORT_CONTEXT.get("report_html", "<h1>Report not ready</h1>")
+        # FIX: return bytes so werkzeug never trips on surrogate characters
+        return Response(_safe_bytes(html), 200, {"Content-Type": "text/html; charset=utf-8"})
+    @_flask_app.route("/journey-report")
+    def _serve_journey_report():
+        html = _REPORT_CONTEXT.get("journey_html", "<h1>Report not ready</h1>")
+        # FIX: return bytes so werkzeug never trips on surrogate characters
+        return Response(_safe_bytes(html), 200, {"Content-Type": "text/html; charset=utf-8"})
+    @_flask_app.route("/chat", methods=["POST"])
+    def _chat_endpoint():
+        data        = request.get_json()
+        messages    = data.get("messages", [])
+        report_text = _REPORT_CONTEXT.get("report_text", "No report available.")
+        system      = GENERAL_CHAT_SYSTEM_PROMPT.format(report_text=report_text)
+        def _gen():
+            client = anthropic.Anthropic(
+                api_key=API_KEY,
+                http_client=httpx.Client(verify=False),
+            )
+            with client.messages.stream(
+                model="claude-sonnet-4-6",
+                max_tokens=2048,
+                system=system,
+                messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    yield f"data: {json.dumps({'text': text})}\n\n"
+            yield "data: [DONE]\n\n"
+        return Response(
+            _gen(),
+            mimetype="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
+def _start_server(port: int):
+    if not _FLASK_OK:
+        print("  (Flask not installed — chat disabled. Run: pip install flask)")
+        return
+    import logging
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
+    threading.Thread(
+        target=lambda: _flask_app.run(port=port, debug=False, use_reloader=False),
+        daemon=True,
+    ).start()
 # ── Chat panel HTML/JS ────────────────────────────────────────────
-def _chat_panel_html(api_url: str) -> str:
+def _chat_panel_html(port: int) -> str:
     return f"""  <div id="chat-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:998;"></div>
   <div id="chat-panel" style="display:none;position:fixed;right:0;top:0;width:440px;max-width:100vw;height:100vh;background:#fff;box-shadow:-4px 0 28px rgba(0,0,0,.18);z-index:999;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
     <div style="background:#0f172a;color:#f8fafc;padding:1rem 1.25rem;display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0;">
@@ -209,8 +279,7 @@ def _chat_panel_html(api_url: str) -> str:
     </div>
   </div>
   <script>
-  var _chatApiUrl='{api_url}';
-  var _reportId=window.location.pathname.split('/').filter(Boolean).pop()||'';
+  var _chatPort={port};
   var _chist=[],_cbusy=false,_selCtx='';
   function _gel(id){{return document.getElementById(id);}}
   function _cmsg(role,text){{
@@ -261,10 +330,10 @@ def _chat_panel_html(api_url: str) -> str:
     _cbusy=true;
     var sendBtn=_gel('cp-send');if(sendBtn)sendBtn.disabled=true;
     try{{
-      var resp=await fetch(_chatApiUrl+'/api/chat',{{
+      var resp=await fetch('http://localhost:{port}/chat',{{
         method:'POST',
         headers:{{'Content-Type':'application/json'}},
-        body:JSON.stringify({{report_id:_reportId,messages:_chist}})
+        body:JSON.stringify({{messages:_chist}})
       }});
       var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',acc='';
       for(;;){{
@@ -301,6 +370,28 @@ def _chat_panel_html(api_url: str) -> str:
   }});
   </script>
 """
+# ── Playwright browser launch with system-chromium fallback ─────
+def _launch_browser(p, headless: bool = True):
+    """
+    Launch Chromium. Falls back to the system-installed chromium binary
+    (provided by nixpacks) if Playwright's bundled browser is missing.
+    """
+    try:
+        return p.chromium.launch(headless=headless)
+    except Exception:
+        pass
+    for name in ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]:
+        path = shutil.which(name)
+        if path:
+            try:
+                return p.chromium.launch(executable_path=path, headless=headless)
+            except Exception:
+                continue
+    raise RuntimeError(
+        "No usable Chromium found. Run: playwright install chromium --with-deps"
+    )
+
+
 # ── Step 1: Render page with Playwright ─────────────────────────
 def _parse_html(url: str, html_content: str) -> dict:
     soup = BeautifulSoup(html_content, "html.parser")
@@ -336,7 +427,7 @@ def playwright_scrape_and_screenshot(url: str, viewport: dict = None) -> tuple[d
     vp = viewport or DESKTOP_VIEWPORT
     print(f"\n  Launching browser for {url} ({vp['width']}x{vp['height']}) ...")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = _launch_browser(p)
         page = browser.new_page(viewport=vp)
         page.goto(url, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(2000)
@@ -361,7 +452,7 @@ def playwright_journey_scrape(url: str, steps: list[dict], viewport: dict = None
     print(f"\n  Launching browser for journey starting at {url} ({vp['width']}x{vp['height']}) ...")
     results = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = _launch_browser(p)
         page = browser.new_page(viewport=vp)
         page.goto(url, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(2000)
@@ -563,7 +654,7 @@ def locate_elements(url: str, locations: list, viewport: dict = None) -> list:
     found = []
     print(f"  Locating issues on the rendered page ({vp['width']}x{vp['height']}) ...")
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = _launch_browser(p)
         page = browser.new_page(viewport=vp)
         page.goto(url, wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(2000)
@@ -698,13 +789,6 @@ RUBRIC = [
     (0,  2, "#dc2626", "Critical",   "Fundamental redesign required"),
 ]
 SEV_WEIGHTS = {"Critical": 2.0, "High": 1.5, "Medium": 0.75, "Low": 0.25}
-_PENALTY_FACTOR = 0.35  # each weight unit subtracts this many score points
-def _compute_score_from_locations(locations: list) -> float:
-    """Compute a deterministic score from issue severities (10 = no issues, lower = more/worse issues)."""
-    if not locations:
-        return 10.0
-    total_weight = sum(SEV_WEIGHTS.get(loc.get("severity", "Medium"), 0.75) for loc in locations)
-    return round(max(0.0, min(10.0, 10.0 - total_weight * _PENALTY_FACTOR)), 1)
 def _extract_score(report_text: str) -> float | None:
     m = re.search(r'\b(\d+(?:\.\d+)?)\s*/\s*10\b', report_text, re.IGNORECASE)
     if m:
@@ -730,7 +814,7 @@ def _rubric_rows_html(score: float, vp: str) -> str:
         active = mn <= score <= mx
         bg     = "rgba(99,102,241,.12)" if active else "transparent"
         border = "3px solid #6366f1"    if active else "3px solid transparent"
-        tc     = "#0f172a"              if active else "#94a3b8"
+        tc     = "#f8fafc"              if active else "#94a3b8"
         rows += (
             f'<div class="rr" data-min="{mn}" data-max="{mx}" '
             f'style="display:flex;align-items:baseline;gap:.5rem;padding:.3rem .5rem;'
@@ -787,357 +871,35 @@ def _extract_issue_details(report_text: str) -> dict:
         end = headers[i + 1].start() if i + 1 < len(headers) else len(report_text)
         block = report_text[start:end]
         detail = {}
-        hm = re.search(r'\*\*Heuristics?\*\*:\s*(.+?)(?:\n|$)', block, re.IGNORECASE)
+        hm = re.search(r'\*\*Heuristics?\*\*[:\s*]+(.+?)(?:\n|$)', block, re.IGNORECASE)
         if hm:
             detail['heuristic'] = hm.group(1).strip().rstrip('*').strip()
-        pm = re.search(r'\*\*Problem\*\*:\s*(.+?)(?=\n\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+        pm = re.search(r'\*\*Problem\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
         if pm:
             detail['problem'] = ' '.join(pm.group(1).split())
-        rm = re.search(r'\*\*Recommendation\*\*:\s*(.+?)(?=\n\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+        rm = re.search(r'\*\*Recommendation\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
         if rm:
             detail['recommendation'] = ' '.join(rm.group(1).split())
         if detail:
             result[issue_num] = detail
     return result
-def _numbered_to_bullets(text: str) -> str:
-    """Convert numbered list items (1. / 2. etc.) to bullet points."""
-    return re.sub(r'(?m)^\s*\d+\.\s+', '- ', text)
-
-
-def _list_to_table(text: str, col1: str, col2: str) -> str:
-    """Convert a bullet/numbered list with 'Key: value' or '**Key** value' into a markdown table.
-
-    Any introductory paragraph before the list is preserved above the table.
-    Falls back to the original text if no parseable rows are found.
-    """
-    # Match list items: optional bullet/number, then bold-or-plain key, then delimiter, then value
-    item_pat = re.compile(
-        r'(?m)^[-*\d.]+\s+(?:\*\*([^*\n]+)\*\*[:\s–—\-]+|([^:\n–—]+)[:\s–—]+)(.+?)(?=\n[-*\d\n]|\Z)',
-        re.DOTALL,
-    )
-    rows: list[tuple[str, str]] = []
-    last_end = 0
-    intro_end = None
-    for m in item_pat.finditer(text):
-        if intro_end is None:
-            intro_end = m.start()
-        key = (m.group(1) or m.group(2) or '').strip().rstrip(':–—-').strip()
-        val = m.group(3).strip().replace('\n', ' ')
-        rows.append((key, val))
-        last_end = m.end()
-
-    if not rows:
-        return text
-
-    intro = text[:intro_end].strip() if intro_end else ''
-    table = f"| {col1} | {col2} |\n|---|---|\n"
-    for k, v in rows:
-        table += f"| {k} | {v} |\n"
-    return (intro + '\n\n' + table).strip() if intro else table.strip()
-
-
-def _synthesize_narrative(strengths_chunks: list[str], summary_chunks: list[str]) -> tuple[str, str]:
-    """Send accumulated Strengths and Summary chunks from multiple batches to Claude
-    for synthesis into integrated, non-repetitive prose.
-    Returns (strengths_text, summary_text).
-    """
-    if not strengths_chunks and not summary_chunks:
-        return "", ""
-
-    parts = []
-    if strengths_chunks:
-        parts.append(
-            "STRENGTHS (extracted from multiple batches — may contain duplicates):\n\n"
-            + "\n\n---\n\n".join(strengths_chunks)
-        )
-    if summary_chunks:
-        parts.append(
-            "SUMMARY (extracted from multiple batches — may be repetitive):\n\n"
-            + "\n\n---\n\n".join(summary_chunks)
-        )
-
-    prompt = """You are editing a UX heuristic evaluation report assembled from multiple \
-batch analyses of a long user journey. The sections below were extracted from each batch \
-separately — synthesise them into integrated, professional prose as if one analyst \
-evaluated the entire journey at once.
-
-Guidelines:
-- Remove all duplicate or near-duplicate observations; merge related points into single insights
-- Never reference "batches", "steps 0–14", or any segment framing
-- Strengths: a clean markdown bullet list (- item), max 8 points, no duplicates
-- Summary: 2–3 cohesive paragraphs covering dominant UX patterns, the most critical \
-failures, and top quick wins across the whole journey
-- Plain markdown only — no section headers in your output
-
-Output using exactly these XML markers:
-<STRENGTHS>
-[bullet list]
-</STRENGTHS>
-<SUMMARY>
-[paragraphs]
-</SUMMARY>
-
-Raw content to synthesise:
----
-""" + "\n\n===\n\n".join(parts) + "\n---"
-
-    print("  Synthesising narrative sections across batches...")
-    client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=2048,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = response.content[0].text
-
-    sm = re.search(r'<STRENGTHS>(.*?)</STRENGTHS>', text, re.DOTALL)
-    pm = re.search(r'<SUMMARY>(.*?)</SUMMARY>',    text, re.DOTALL)
-    strengths = sm.group(1).strip() if sm else "\n\n".join(strengths_chunks)
-    summary   = pm.group(1).strip() if pm else "\n\n".join(summary_chunks)
-    return strengths, summary
-
-
-def _merge_batch_reports(report_parts: list[str], avg_score: float) -> str:
-    """Combine multiple batch reports into one cohesive compiled document.
-
-    Extracts Issues, Strengths, Flow Continuity, Progress Visibility, Drop-off Risks,
-    Cross-step Consistency, and Summary from each batch and compiles them into a
-    single unified report — no batch headers, no repeated section titles.
-    """
-    # Named sections we want to compile (regex pattern → output heading)
-    SECTIONS = [
-        ("flow_continuity",       r"flow\s+continuity(?:\s+assessment)?"),
-        ("progress_visibility",   r"progress\s+visibility"),
-        ("dropoff_risks",         r"drop.?off\s+risks?"),
-        ("cross_step",            r"cross.?step\s+consistency"),
-        ("strengths",             r"strengths?(?:\s+observed)?|areas?\s+of\s+strength"),
-        ("summary",               r"summary"),
-    ]
-    SECTION_HEADING = {
-        "flow_continuity":     "## Flow Continuity Assessment",
-        "progress_visibility": "## Progress Visibility",
-        "dropoff_risks":       "## Drop-off Risks",
-        "cross_step":          "## Cross-step Consistency",
-        "strengths":           "## Strengths",
-        "summary":             "## Summary",
-    }
-    accumulated: dict[str, list[str]] = {key: [] for key, _ in SECTIONS}
-    accumulated["issues"] = []
-
-    # Combined pattern to locate any named section header in the post-issues text
-    all_section_pat = re.compile(
-        r'(?m)^(?:#{1,4}\s*|\*{{1,2}})?(?:' +
-        '|'.join(pat for _, pat in SECTIONS) +
-        r')(?:\s+Assessment)?[^\n]*\n?',
-        re.IGNORECASE,
-    )
-
-    for report in report_parts:
-        # 1. Strip top-level title (e.g. "# Nielsen Heuristic Evaluation — AFAP …")
-        report = re.sub(r'(?m)^#{1,2}\s+[^\n]+\n?', '', report, count=2).strip()
-
-        # 2. Split at last **Severity:** — everything before is issues, rest is sections
-        sev_matches = list(re.finditer(r'\*\*Severity:\*\*[^\n]*', report, re.IGNORECASE))
-        if sev_matches:
-            split_pos = sev_matches[-1].end()
-            issues_raw = report[:split_pos].strip()
-            rest       = report[split_pos:].strip()
-        else:
-            fb = re.search(
-                r'(?m)^(?:#{1,4}\s*|\*\*)?(?:' + '|'.join(pat for _, pat in SECTIONS) + r')',
-                report, re.IGNORECASE,
-            )
-            issues_raw = report[:fb.start()].strip() if fb else report.strip()
-            rest       = report[fb.start():].strip() if fb else ""
-
-        # 3. Strip "Issues Found" / "## Issues" header from the issues block
-        issues_clean = re.sub(
-            r'(?m)^(?:#{1,4}\s*)?(?:Issues?\s+Found|Issues?)[^\n]*\n?',
-            '', issues_raw, flags=re.IGNORECASE,
-        ).strip()
-        # Also strip leading --- separators
-        issues_clean = re.sub(r'(?m)^---+\s*\n?', '', issues_clean).strip()
-        if issues_clean:
-            accumulated["issues"].append(issues_clean)
-
-        # 4. Remove score line and the rubric-descriptor line that often follows it
-        #    e.g. "Overall Score: 4/10" AND "**Poor** — Significant UX failures…"
-        rest_no_score = re.sub(r'(?m)^[^\n]*\b\d+(?:\.\d+)?\s*/\s*10\b[^\n]*\n?', '', rest)
-        rest_no_score = re.sub(
-            r'(?m)^[ \t]*\*{0,2}(?:Near-perfect|Needs Work|Poor|Good|Critical)\*{0,2}'
-            r'[ \t]*[—–-][^\n]*\n?',
-            '', rest_no_score, flags=re.IGNORECASE,
-        ).strip()
-
-        # 5. Find section header positions in rest_no_score
-        header_matches = list(all_section_pat.finditer(rest_no_score))
-
-        # 5a. Capture any preamble text before the first section header as summary.
-        #     Claude sometimes writes the summary paragraph before "## Strengths".
-        if header_matches:
-            preamble = rest_no_score[:header_matches[0].start()].strip()
-            preamble = re.sub(r'(?m)^---+\s*\n?', '', preamble).strip()
-            if preamble:
-                accumulated["summary"].append(preamble)
-
-        for i, m in enumerate(header_matches):
-            header_text = m.group(0).strip()
-            content_start = m.end()
-            content_end   = header_matches[i + 1].start() if i + 1 < len(header_matches) else len(rest_no_score)
-            content = rest_no_score[content_start:content_end].strip()
-            content = re.sub(r'(?m)^---+\s*\n?', '', content).strip()
-            if not content:
-                continue
-
-            # Identify which section this header belongs to
-            section_key = None
-            for key, pat in SECTIONS:
-                if re.search(pat, header_text, re.IGNORECASE):
-                    section_key = key
-                    break
-            if section_key is None:
-                continue
-
-            # 5b. For the LAST section header (when it's not "summary"), split off any
-            #     trailing prose paragraph(s) as summary material so they don't get
-            #     swallowed by e.g. the Strengths section.
-            if i + 1 == len(header_matches) and section_key != "summary":
-                paragraphs = [p.strip() for p in re.split(r'\n{2,}', content) if p.strip()]
-                # Work backwards: collect paragraphs that look like prose (not list items
-                # or markdown headers) as a trailing summary block.
-                list_items: list[str] = []
-                trailing_prose: list[str] = []
-                found_list = False
-                for para in reversed(paragraphs):
-                    if not found_list and not re.match(r'^[-*\d#]', para):
-                        trailing_prose.insert(0, para)
-                    else:
-                        found_list = True
-                        list_items.insert(0, para)
-                # Only split if there are both list items AND trailing prose —
-                # avoids stripping Strengths content when there are no list items at all.
-                if trailing_prose and list_items:
-                    accumulated["summary"].append("\n\n".join(trailing_prose))
-                    content = "\n\n".join(list_items).strip()
-
-            if content:
-                accumulated[section_key].append(content)
-
-        # 6. If no section headers were found, treat the rest as summary
-        if not header_matches and rest_no_score:
-            accumulated["summary"].append(rest_no_score)
-
-    # When multiple batches were merged, synthesise Strengths and Summary through
-    # Claude so the output reads as one integrated analysis rather than stacked chunks.
-    if len(report_parts) > 1 and (accumulated["strengths"] or accumulated["summary"]):
-        synth_s, synth_sum = _synthesize_narrative(
-            accumulated["strengths"], accumulated["summary"]
-        )
-        accumulated["strengths"] = [synth_s] if synth_s else []
-        accumulated["summary"]   = [synth_sum] if synth_sum else []
-
-    # Build unified output
-    out_parts: list[str] = []
-
-    if accumulated["issues"]:
-        out_parts.append("## Issues\n\n" + "\n\n---\n\n".join(accumulated["issues"]))
-
-    # Strengths: convert numbered list to bullet points
-    if accumulated["strengths"]:
-        strengths_text = _numbered_to_bullets("\n\n".join(accumulated["strengths"]))
-        out_parts.append("## Strengths\n\n" + strengths_text)
-
-    # Summary section: General (flow continuity table, progress visibility, cross-step)
-    # and Quick Wins (drop-off risks, summary text)
-    summary_parts: list[str] = []
-
-    general_chunks: list[str] = []
-    if accumulated["flow_continuity"]:
-        fc_text = "\n\n".join(accumulated["flow_continuity"])
-        general_chunks.append(_list_to_table(fc_text, "Transition", "Assessment"))
-    if accumulated["progress_visibility"]:
-        general_chunks.append("\n\n".join(accumulated["progress_visibility"]))
-    if accumulated["cross_step"]:
-        cs_text = "\n\n".join(accumulated["cross_step"])
-        general_chunks.append(_list_to_table(cs_text, "Element", "Consistency Note"))
-    if general_chunks:
-        summary_parts.append("### General\n\n" + "\n\n".join(general_chunks))
-
-    quick_wins_chunks: list[str] = []
-    if accumulated["dropoff_risks"]:
-        dr_text = "\n\n".join(accumulated["dropoff_risks"])
-        quick_wins_chunks.append(_list_to_table(dr_text, "Drop-off Point", "Risk"))
-    if accumulated["summary"]:
-        quick_wins_chunks.append("\n\n".join(accumulated["summary"]))
-    if quick_wins_chunks:
-        summary_parts.append("### Quick Wins\n\n" + "\n\n".join(quick_wins_chunks))
-
-    if summary_parts:
-        out_parts.append("## Summary\n\n" + "\n\n".join(summary_parts))
-
-    return "\n\n".join(out_parts)
-
-
-def _renumber_issues_in_report(report_text: str, offset: int) -> str:
-    """Add offset to every issue number in a report text block."""
-    if offset == 0:
-        return report_text
-    def _replace(m):
-        return m.group(0).replace(m.group(1), str(int(m.group(1)) + offset), 1)
-    return re.sub(
-        r'(?mi)^((?:#{1,4}\s*)?(?:\*\*)?Issue\s+)(\d+)',
-        lambda m: m.group(1) + str(int(m.group(2)) + offset),
-        report_text,
-    )
-
 def _escape_report(report_text: str) -> str:
-    # 1. Apply severity colour substitutions on raw markdown before HTML-escaping,
-    #    so we can emit real HTML tags without them getting escaped.
-    coloured: dict[str, str] = {}
-    text = report_text.encode("utf-8", errors="replace").decode("utf-8")
+    escaped = (
+        report_text
+        .encode("utf-8", errors="replace").decode("utf-8")
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
     for sev, color in SEVERITY_HEX.items():
-        placeholder = f"\x00SEV_{sev}\x00"
-        text = text.replace(f"**{sev}**", placeholder)
-        text = text.replace(f"Severity:** **{sev}**", f"Severity:** {placeholder}")
-        coloured[placeholder] = f'<strong style="color:{color}">{sev}</strong>'
-
-    # 2. HTML-escape the rest (no real < > & remain in normal report text)
-    escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    # 3. Restore severity HTML
-    for placeholder, html in coloured.items():
-        escaped = escaped.replace(placeholder, html)
-
-    # 4. Convert markdown headers to styled HTML (must happen after HTML-escaping
-    #    so the injected tags are not double-escaped)
-    escaped = re.sub(r'(?m)^#### ([^\n]+)$', r'<h4 class="rpt-h4">\1</h4>', escaped)
-    escaped = re.sub(r'(?m)^### ([^\n]+)$',  r'<h3 class="rpt-h3">\1</h3>', escaped)
-    escaped = re.sub(r'(?m)^## ([^\n]+)$',   r'<h2 class="rpt-h2">\1</h2>', escaped)
-    escaped = re.sub(r'(?m)^# ([^\n]+)$',    r'<h1 class="rpt-h1">\1</h1>', escaped)
-
-    # 5. Convert remaining **bold** spans
-    escaped = re.sub(r'\*\*([^*\n]+)\*\*', r'<strong>\1</strong>', escaped)
-
-    # 6. Convert markdown tables to HTML tables
-    def _render_md_table(m: re.Match) -> str:
-        html_rows: list[str] = []
-        is_header = True
-        for line in m.group(0).strip().splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            if re.match(r'^\|[-:| ]+\|$', line):   # separator row
-                is_header = False
-                continue
-            cells = [c.strip() for c in line.strip('|').split('|')]
-            tag = 'th' if is_header else 'td'
-            html_rows.append('<tr>' + ''.join(f'<{tag}>{c}</{tag}>' for c in cells) + '</tr>')
-            if is_header:
-                is_header = False
-        return '<table class="rpt-table"><tbody>' + ''.join(html_rows) + '</tbody></table>'
-
-    escaped = re.sub(r'(?m)(?:^\|[^\n]+\|\n)+', _render_md_table, escaped)
-
+        escaped = escaped.replace(
+            f"**{sev}**",
+            f'<strong style="color:{color}">{sev}</strong>',
+        )
+        escaped = escaped.replace(
+            f"Severity:** **{sev}**",
+            f'Severity: <strong style="color:{color}">{sev}</strong>',
+        )
     return escaped
 def _viewport_tab_html(desktop_content: str, mobile_content: str) -> str:
     return f"""
@@ -1243,27 +1005,17 @@ def _modal_html() -> str:
     var chatBtn = hasChat
       ? '<button id="ss-ask-btn" style="width:100%;padding:.65rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.88rem;font-family:system-ui,sans-serif;">&#128172; Ask Claude about this</button>'
       : '';
-    var heuristicBadge = issue.heuristic
-      ? '<span style="background:#1e3a5f;color:#93c5fd;border-radius:4px;padding:.15rem .55rem;font-size:.72rem;font-weight:600;font-family:system-ui,sans-serif;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px;display:inline-block;vertical-align:middle;" title="'+_esc(issue.heuristic)+'">'+_esc(issue.heuristic)+'</span>'
-      : '';
-    var problemHtml = issue.problem
-      ? '<p style="font-size:.83rem;color:#cbd5e1;line-height:1.6;font-family:system-ui,sans-serif;margin-bottom:1rem;">'+_esc(issue.problem)+'</p>'
-      : '';
-    var recHtml = issue.recommendation
-      ? '<div style="background:#0f2137;border-left:3px solid #6366f1;border-radius:0 6px 6px 0;padding:.65rem .85rem;margin-bottom:1.1rem;">' +
-          '<div style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6366f1;font-family:system-ui,sans-serif;margin-bottom:.3rem;">Recommendation</div>' +
-          '<p style="font-size:.83rem;color:#cbd5e1;line-height:1.6;font-family:system-ui,sans-serif;margin:0;">'+_esc(issue.recommendation)+'</p>' +
-        '</div>'
-      : '';
     content.innerHTML =
-      '<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;margin-bottom:.85rem;">' +
-        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.25rem .65rem;font-size:.95rem;font-weight:700;font-family:system-ui,sans-serif;flex-shrink:0;">#'+issue.issue_number+'</span>' +
-        '<span style="background:'+color+'33;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.75rem;font-weight:600;font-family:system-ui,sans-serif;flex-shrink:0;">'+_esc(issue.severity)+'</span>' +
-        heuristicBadge +
+      '<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem;">' +
+        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.25rem .7rem;font-size:1rem;font-weight:700;font-family:system-ui,sans-serif;">#'+issue.issue_number+'</span>' +
+        '<span style="background:'+color+'33;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.78rem;font-weight:600;font-family:system-ui,sans-serif;">'+_esc(issue.severity)+'</span>' +
       '</div>' +
-      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:.75rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
-      problemHtml +
-      recHtml +
+      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:1rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
+      '<div style="border-top:1px solid #334155;padding-top:.9rem;margin-bottom:1rem;">' +
+        _ssField('Heuristic', issue.heuristic) +
+        _ssField('Problem', issue.problem) +
+        _ssField('Recommendation', issue.recommendation) +
+      '</div>' +
       ignBtn +
       chatBtn;
     if(vp) {
@@ -1343,7 +1095,7 @@ def _modal_html() -> str:
       var active = score >= mn && score <= mx;
       row.style.background    = active ? 'rgba(99,102,241,.12)' : 'transparent';
       row.style.borderLeft    = active ? '3px solid #6366f1'    : '3px solid transparent';
-      row.querySelector('span:nth-child(2)').style.color = active ? '#0f172a' : '#94a3b8';
+      row.querySelector('span:nth-child(2)').style.color = active ? '#f8fafc' : '#94a3b8';
     });
   }
   function _updateLegendRow(vp, issueNum, isIgnored) {
@@ -1363,181 +1115,9 @@ def _modal_html() -> str:
 })();
 </script>
 """
-def _bench_panel_html(api_url: str) -> str:
-    """Benchmark progress panel + JS wired to #open-bench-btn."""
-    return f"""
-  <!-- ── Benchmark panel ── -->
-  <div id="bench-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1998;"></div>
-  <div id="bench-panel" style="display:none;position:fixed;right:0;top:0;width:420px;max-width:100vw;
-       height:100vh;background:#fff;box-shadow:-4px 0 28px rgba(0,0,0,.18);z-index:1999;
-       flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-    <div style="background:#0f172a;color:#f8fafc;padding:1rem 1.25rem;display:flex;
-         justify-content:space-between;align-items:flex-start;flex-shrink:0;">
-      <div>
-        <div style="font-weight:700;font-size:.95rem;">&#128202; Benchmark competitors</div>
-        <div style="font-size:.72rem;color:#94a3b8;margin-top:.2rem;">
-          Identifies your product type, finds competitors, captures their flows
-        </div>
-      </div>
-      <button id="bp-close" style="flex-shrink:0;margin-left:.75rem;background:none;border:none;
-              color:#94a3b8;font-size:1.5rem;line-height:1;cursor:pointer;padding:0;">&times;</button>
-    </div>
-    <div style="padding:1.25rem;flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:.75rem;">
-      <div id="bp-intro" style="font-size:.85rem;color:#475569;line-height:1.6;">
-        This will:<br/>
-        &nbsp;1. Identify the product type and workflows from this report<br/>
-        &nbsp;2. Search the web for regional &amp; global competitors<br/>
-        &nbsp;3. Capture screenshots of their relevant flows using Playwright + Claude<br/>
-        &nbsp;4. Search Mobbin for matching design patterns<br/><br/>
-        <em>Takes 1–3 minutes depending on how many competitors are found.</em>
-      </div>
-      <div id="bp-log" style="display:none;flex-direction:column;gap:.4rem;"></div>
-      <div id="bp-spinner" style="display:none;align-items:center;gap:.6rem;font-size:.84rem;color:#6366f1;font-weight:600;">
-        <span style="width:16px;height:16px;border:2px solid #c7d2fe;border-top-color:#6366f1;
-              border-radius:50%;animation:bp-spin 0.7s linear infinite;flex-shrink:0;"></span>
-        <span id="bp-spinner-txt">Running…</span>
-      </div>
-    </div>
-    <div style="padding:.75rem 1.25rem;border-top:1px solid #e2e8f0;flex-shrink:0;background:#fff;">
-      <button id="bp-run-btn" style="width:100%;padding:.6rem 1rem;background:#0f172a;color:#fff;
-              border:none;border-radius:8px;font-size:.9rem;font-weight:700;cursor:pointer;
-              transition:background .15s;">
-        &#9654; Run benchmark
-      </button>
-    </div>
-  </div>
-  <style>
-    @keyframes bp-spin {{ to {{ transform: rotate(360deg); }} }}
-  </style>
-  <script>
-  (function(){{
-    var _benchApiUrl = '{api_url}';
-    var _benchRunning = false;
-
-    function _bpEl(id) {{ return document.getElementById(id); }}
-
-    function openBench() {{
-      _bpEl('bench-overlay').style.display = 'block';
-      _bpEl('bench-panel').style.display   = 'flex';
-    }}
-    function closeBench() {{
-      if (_benchRunning) return;
-      _bpEl('bench-overlay').style.display = 'none';
-      _bpEl('bench-panel').style.display   = 'none';
-    }}
-
-    function _addLog(msg, done) {{
-      var log = _bpEl('bp-log');
-      log.style.display = 'flex';
-      var row = document.createElement('div');
-      row.style.cssText = 'font-size:.8rem;color:' + (done ? '#16a34a' : '#475569') + ';display:flex;gap:.4rem;align-items:flex-start;';
-      row.innerHTML = (done ? '&#10003;' : '&#8250;') + ' ' + msg;
-      log.appendChild(row);
-      log.scrollTop = log.scrollHeight;
-    }}
-
-    async function runBenchmark() {{
-      if (_benchRunning) return;
-      var reportId = window.location.pathname.split('/').filter(Boolean).pop() || '';
-      if (!reportId) {{ alert('Could not determine report ID.'); return; }}
-
-      _benchRunning = true;
-      _bpEl('bp-intro').style.display    = 'none';
-      _bpEl('bp-run-btn').disabled       = true;
-      _bpEl('bp-run-btn').textContent    = 'Running…';
-      _bpEl('bp-spinner').style.display  = 'flex';
-      _bpEl('bp-log').style.display      = 'flex';
-
-      try {{
-        var resp = await fetch(_benchApiUrl + '/api/benchmark', {{
-          method:  'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body:    JSON.stringify({{report_id: reportId}}),
-        }});
-
-        var reader = resp.body.getReader(), dec = new TextDecoder(), buf = '';
-        for (;;) {{
-          var r = await reader.read();
-          if (r.done) break;
-          buf += dec.decode(r.value, {{stream: true}});
-          var lines = buf.split('\\n');
-          buf = lines.pop();
-          for (var i = 0; i < lines.length; i++) {{
-            var ln = lines[i];
-            if (!ln.startsWith('data: ')) continue;
-            var chunk = ln.slice(6).trim();
-            try {{
-              var evt = JSON.parse(chunk);
-              if (evt.type === 'progress') {{
-                _addLog(evt.message, false);
-                _bpEl('bp-spinner-txt').textContent = evt.message;
-              }} else if (evt.type === 'complete') {{
-                _addLog('Benchmark complete — opening report…', true);
-                _bpEl('bp-spinner').style.display = 'none';
-                _bpEl('bp-run-btn').textContent   = '&#10003; Done — report opened';
-                window.open(_benchApiUrl + '/api/report/' + evt.report_id, '_blank');
-              }} else if (evt.type === 'error') {{
-                _addLog('Error: ' + evt.message, false);
-                _bpEl('bp-spinner').style.display = 'none';
-                _bpEl('bp-run-btn').disabled       = false;
-                _bpEl('bp-run-btn').textContent    = 'Retry benchmark';
-                _benchRunning = false;
-              }}
-            }} catch(ex) {{}}
-          }}
-        }}
-      }} catch(err) {{
-        _addLog('Network error: ' + err.message, false);
-        _bpEl('bp-spinner').style.display = 'none';
-        _bpEl('bp-run-btn').disabled       = false;
-        _bpEl('bp-run-btn').textContent    = 'Retry benchmark';
-        _benchRunning = false;
-      }}
-    }}
-
-    document.addEventListener('click', function(e) {{
-      var t = e.target;
-      if (t === _bpEl('bench-overlay'))      {{ closeBench(); return; }}
-      if (t.closest && t.closest('#bp-close'))      {{ closeBench(); return; }}
-      if (t.closest && t.closest('#open-bench-btn')) {{ openBench(); return; }}
-      if (t.closest && t.closest('#bp-run-btn'))     {{ runBenchmark(); return; }}
-    }});
-    document.addEventListener('keydown', function(e) {{
-      if (e.key === 'Escape') closeBench();
-    }});
-  }})();
-  </script>
-"""
-
-
-def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_url: str = None) -> str:
-    ask_btn = (
-        """<button id="open-chat-btn" style="display:flex;align-items:center;gap:.4rem;"""
-        """padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;"""
-        """font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" """
-        """onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">"""
-        """&#128172; Ask Claude</button>"""
-    ) if api_url else ""
-    bench_btn = (
-        """<button id="open-bench-btn" style="display:flex;align-items:center;gap:.4rem;"""
-        """padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;"""
-        """border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;"""
-        """transition:border-color .15s,color .15s;" """
-        """onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" """
-        """onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">"""
-        """&#128202; Benchmark competitors</button>"""
-    ) if api_url else ""
-    new_btn = (
-        """<a href="/" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;"""
-        """background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;"""
-        """font-size:.85rem;font-weight:600;cursor:pointer;text-decoration:none;white-space:nowrap;"""
-        """transition:border-color .15s,color .15s;" """
-        """onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" """
-        """onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>"""
-    )
-    right_btns = f'<div style="margin-left:auto;display:flex;align-items:center;gap:.5rem;">{ask_btn}{bench_btn}{new_btn}</div>'
-    chat_panel = _chat_panel_html(api_url) if api_url else ""
-    bench_panel = _bench_panel_html(api_url) if api_url else ""
+def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port: int = None) -> str:
+    chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if port else ""
+    chat_panel = _chat_panel_html(port) if port else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1576,18 +1156,6 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
       color: white; font-weight: 600; font-size: 0.75rem; }}
     .report-body {{ font-size: 0.92rem; white-space: pre-wrap; word-wrap: break-word;
       color: #334155; line-height: 1.75; }}
-    .report-body h1,.report-body h2,.report-body h3,.report-body h4 {{
-      white-space: normal; margin: 1.4em 0 0.4em; font-family: inherit; }}
-    .report-body .rpt-h1,.report-body .rpt-h2 {{ font-size: 1.15rem; font-weight: 700;
-      color: #1e293b; border-bottom: 1px solid #e2e8f0; padding-bottom: 0.25em; }}
-    .report-body .rpt-h3 {{ font-size: 1rem; font-weight: 700; color: #1e293b; }}
-    .report-body .rpt-h4 {{ font-size: 0.95rem; font-weight: 600; color: #475569; }}
-    .report-body .rpt-table {{ width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.875rem; }}
-    .report-body .rpt-table th {{ background: #f1f5f9; color: #1e293b; font-weight: 700;
-      text-align: left; padding: 0.5rem 0.75rem; border: 1px solid #e2e8f0; }}
-    .report-body .rpt-table td {{ padding: 0.45rem 0.75rem; border: 1px solid #e2e8f0;
-      vertical-align: top; color: #334155; }}
-    .report-body .rpt-table tr:nth-child(even) td {{ background: #f8fafc; }}
     ::selection {{ background: #bfdbfe; color: #1e3a8a; }}
     {extra_css}
   </style>
@@ -1600,7 +1168,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
   <div id="top-bar">
     <button class="vp-tab active" onclick="switchVP('desktop',this)">&#128760; Desktop (1440px)</button>
     <button class="vp-tab" onclick="switchVP('mobile',this)">&#128241; Mobile (390px)</button>
-    {right_btns}
+    {chat_btn}
   </div>
   <script>
   function switchVP(name,btn){{
@@ -1613,13 +1181,12 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", api_u
   <main>{body}
   </main>
   {chat_panel}
-  {bench_panel}
   {_modal_html()}
 </body>
 </html>"""
 def _single_viewport_section(
     report_text: str, annotated_png: bytes, locations: list,
-    viewport_label: str = "desktop", api_url: str = None,
+    viewport_label: str = "desktop", port: int = None,
 ) -> str:
     vp = viewport_label
     img_b64 = base64.b64encode(annotated_png).decode()
@@ -1657,9 +1224,7 @@ def _single_viewport_section(
             "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
             "severity":     loc.get("severity", "Medium"),
             "bbox_pct":     loc.get("bbox_pct"),
-            "heuristic":    loc.get("heuristic") or issue_details.get(loc["issue_number"], {}).get("heuristic"),
-            "problem":      loc.get("problem") or issue_details.get(loc["issue_number"], {}).get("problem"),
-            "recommendation": loc.get("recommendation") or issue_details.get(loc["issue_number"], {}).get("recommendation"),
+            **issue_details.get(loc["issue_number"], {}),
         }
         for loc in locations
     ])
@@ -1684,56 +1249,55 @@ def generate_html(
     url: str,
     desktop_report: str, desktop_png: bytes, desktop_locs: list,
     mobile_report: str,  mobile_png: bytes,  mobile_locs: list,
-    api_url: str = None,
+    port: int = None,
 ) -> str:
-    desktop_section = _single_viewport_section(desktop_report, desktop_png, desktop_locs, "desktop", api_url)
-    mobile_section  = _single_viewport_section(mobile_report,  mobile_png,  mobile_locs,  "mobile",  api_url)
+    desktop_section = _single_viewport_section(desktop_report, desktop_png, desktop_locs, "desktop", port)
+    mobile_section  = _single_viewport_section(mobile_report,  mobile_png,  mobile_locs,  "mobile",  port)
     return _html_shell(
         title="Heuristic Evaluation Report",
         subtitle=url,
         body=_viewport_tab_html(desktop_section, mobile_section),
-        api_url=api_url,
+        port=port,
     )
 # ── Step 7b: Journey HTML report ────────────────────────────────
 def _single_journey_section(
     steps_data: list[dict], report_text: str, locations: list,
-    viewport_label: str = "desktop", api_url: str = None,
-    issue_details_override: dict = None,
-    score_override: float | None = None,
+    viewport_label: str = "desktop", port: int = None,
 ) -> str:
     vp = viewport_label
-    issue_details = issue_details_override if issue_details_override is not None else _extract_issue_details(report_text)
-    score_val = score_override if score_override is not None else (_extract_score(report_text) or 0.0)
+    issue_details = _extract_issue_details(report_text)
+    score_val = _extract_score(report_text) or 0.0
     step_cards = ""
     for step in steps_data:
         crops = step.get("issue_crops", [])
-        step_locs = step.get("locations", [])
-        has_issues = any(issue_num != -1 for issue_num, *_ in crops)
-
-        # Full annotated screenshot — always shown, clickable to open modal
-        full_img_b64 = base64.b64encode(step["screenshot_bytes"]).decode()
-        modal_issues = json.dumps([
-            {
-                "issue_number": loc["issue_number"],
-                "short_title":  loc.get("short_title", f"Issue {loc['issue_number']}"),
-                "severity":     loc.get("severity", "Medium"),
-                "bbox_pct":     loc.get("bbox_pct"),
-                "heuristic":    loc.get("heuristic") or issue_details.get(loc["issue_number"], {}).get("heuristic"),
-                "problem":      loc.get("problem") or issue_details.get(loc["issue_number"], {}).get("problem"),
-                "recommendation": loc.get("recommendation") or issue_details.get(loc["issue_number"], {}).get("recommendation"),
-            }
-            for loc in step_locs
-        ])
-        modal_data = _html_mod.escape(modal_issues)
-        cursor = "zoom-in" if step_locs else "default"
-        click_handler = f'onclick="_ssOpen(this.src,JSON.parse(this.dataset.issues),\'{vp}\')"' if step_locs else ""
-        full_ss_html = f"""
-        <img src="data:image/png;base64,{full_img_b64}" alt="Step {step['step_num']} screenshot"
-             style="cursor:{cursor};width:100%;display:block;"
-             data-issues="{modal_data}"
-             {click_handler} />"""
-
-        no_issues_label = '' if has_issues else '<div style="padding:.4rem .6rem;font-size:.75rem;color:#94a3b8;">No issues found</div>'
+        crop_imgs = ""
+        for issue_num, short_title, severity, crop_bytes in crops:
+            img_b64 = base64.b64encode(crop_bytes).decode()
+            if issue_num == -1:
+                crop_imgs += f"""
+          <div class="crop-block no-issues-block">
+            <div class="crop-label no-issues-label">No issues found</div>
+            <img src="data:image/png;base64,{img_b64}" alt="Step thumbnail" />
+          </div>"""
+            else:
+                hex_color = SEVERITY_HEX.get(severity, "#d97706")
+                issue_data_attr = _html_mod.escape(json.dumps({
+                    "issue_number": issue_num,
+                    "short_title":  short_title or f"Issue {issue_num}",
+                    "severity":     severity or "Medium",
+                    **issue_details.get(issue_num, {}),
+                }))
+                crop_imgs += f"""
+          <div class="crop-block">
+            <div class="crop-label" style="background:{hex_color}">
+              <span class="crop-badge">#{issue_num}</span>
+              <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">{short_title}</span>
+            </div>
+            <img src="data:image/png;base64,{img_b64}" alt="Issue #{issue_num}"
+                 style="cursor:zoom-in;"
+                 data-issue="{issue_data_attr}"
+                 onclick="_ssCropClick(this.src,JSON.parse(this.dataset.issue),'{vp}')" />
+          </div>"""
         step_cards += f"""
       <div class="step-card">
         <div class="step-header">
@@ -1741,8 +1305,7 @@ def _single_journey_section(
           <span class="step-label">{step['label']}</span>
           <span class="step-url">{step['url']}</span>
         </div>
-        {full_ss_html}
-        {no_issues_label}
+        <div class="crop-list">{crop_imgs}</div>
       </div>"""
     legend_rows = ""
     for loc in locations:
@@ -1788,12 +1351,10 @@ def generate_journey_html(
     start_url: str,
     desktop_steps: list[dict], desktop_report: str, desktop_locs: list,
     mobile_steps: list[dict],  mobile_report: str,  mobile_locs: list,
-    api_url: str = None,
-    issue_details_override: dict = None,
-    score_override: float | None = None,
+    port: int = None,
 ) -> str:
-    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", api_url, issue_details_override, score_override)
-    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  api_url, issue_details_override, score_override)
+    desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", port)
+    mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  port)
     return _html_shell(
         title="Journey Heuristic Evaluation Report",
         subtitle=f"Journey starting at {start_url} &nbsp;&middot;&nbsp; {len(desktop_steps)} steps",
@@ -1821,16 +1382,167 @@ def generate_journey_html(
     .timeline-section h2 { margin-bottom: 1rem; font-size: 1.1rem; color: #475569; }
     """,
         body=_viewport_tab_html(desktop_section, mobile_section),
-        api_url=api_url,
+        port=port,
     )
-
-# ── Screenshot helpers ────────────────────────────────────────────
+# ── Journey step builder ─────────────────────────────────────────
+def _build_journey_interactively() -> list[dict]:
+    print("""
+  Define your journey steps. Available actions:
+    click_text     — click an element by its visible text
+    click_selector — click an element by CSS selector
+    fill           — fill an input by CSS selector  (needs: selector, value)
+    fill_label     — fill an input by its label     (needs: label, value)
+    navigate       — go to a URL                    (needs: url)
+    wait           — wait N milliseconds            (needs: ms)
+    scroll         — scroll down by N pixels        (needs: amount)
+    hover          — hover over a CSS selector      (needs: value)
+    press          — press a keyboard key           (needs: key, e.g. Enter)
+    done           — finish
+""")
+    steps = []
+    while True:
+        action = input(f"  Step {len(steps) + 1} action (or 'done'): ").strip().lower()
+        if action == "done":
+            break
+        if action not in ("click_text", "click_selector", "fill", "fill_label",
+                          "navigate", "wait", "scroll", "hover", "press"):
+            print("  Unknown action, try again.")
+            continue
+        step: dict = {"action": action}
+        if action in ("click_text", "click_selector", "hover"):
+            step["value"] = input("    Text / selector: ").strip()
+        elif action == "fill":
+            step["selector"] = input("    CSS selector: ").strip()
+            step["value"] = input("    Value to type: ").strip()
+        elif action == "fill_label":
+            step["label"] = input("    Label text: ").strip()
+            step["value"] = input("    Value to type: ").strip()
+        elif action == "navigate":
+            step["url"] = input("    URL: ").strip()
+        elif action == "wait":
+            step["ms"] = int(input("    Milliseconds [2000]: ").strip() or "2000")
+        elif action == "scroll":
+            step["amount"] = int(input("    Pixels to scroll [500]: ").strip() or "500")
+        elif action == "press":
+            step["key"] = input("    Key (e.g. Enter, Tab): ").strip()
+        step["label"] = (
+            input(f"    Step label (press Enter to skip): ").strip()
+            or f"Step {len(steps) + 1}: {action}"
+        )
+        steps.append(step)
+        print(f"  + Added: {step['label']}")
+    return steps
+def _load_journey_from_file(path: str) -> list[dict]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+# ── Run functions ─────────────────────────────────────────────────
+def _analyze_viewport(url: str, viewport: dict, label: str) -> tuple[str, bytes, list]:
+    print(f"\n── {label} analysis ──")
+    content, screenshot = playwright_scrape_and_screenshot(url, viewport)
+    formatted = format_for_prompt(content)
+    full_response = call_claude(formatted, label.lower())
+    report_text, locations = parse_response(full_response)
+    found = locate_elements(url, locations, viewport)
+    annotated_png = annotate_screenshot(screenshot, found)
+    return report_text, annotated_png, locations
+def run(url: str):
+    port = _find_free_port() if _FLASK_OK else None
+    desktop_report, desktop_png, desktop_locs = _analyze_viewport(url, DESKTOP_VIEWPORT, "Desktop")
+    mobile_report,  mobile_png,  mobile_locs  = _analyze_viewport(url, MOBILE_VIEWPORT,  "Mobile")
+    html = generate_html(
+        url,
+        desktop_report, desktop_png, desktop_locs,
+        mobile_report,  mobile_png,  mobile_locs,
+        port=port,
+    )
+    with open("heuristics_report.html", "wb") as f:
+        f.write(_safe_bytes(html))
+    with open("heuristics_report.txt", "wb") as f:
+        f.write(_safe_bytes(
+            f"URL: {url}\n\n"
+            f"=== DESKTOP ===\n{desktop_report}\n\n"
+            f"=== MOBILE ===\n{mobile_report}"
+        ))
+    if port:
+        _REPORT_CONTEXT["report_text"] = (
+            f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
+            f"=== MOBILE VIEWPORT ===\n{mobile_report}"
+        )
+        _REPORT_CONTEXT["report_html"] = html
+        _start_server(port)
+        report_url = f"http://localhost:{port}/report"
+        print(f"\n  Report → {report_url}")
+        print("  Chat server running — press Ctrl+C to stop.\n")
+        webbrowser.open(report_url)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            print("\n  Done.")
+    else:
+        print("\n  HTML report saved → heuristics_report.html")
+        print("  Text report saved → heuristics_report.txt")
+def _analyze_journey_viewport(
+    url: str, steps: list[dict], viewport: dict, label: str
+) -> tuple[list, str, list]:
+    print(f"\n── {label} journey analysis ──")
+    steps_data = playwright_journey_scrape(url, steps, viewport)
+    full_response = call_claude_journey(steps_data, label.lower())
+    report_text, locations = parse_response(full_response)
+    locs_by_step = defaultdict(list)
+    for loc in locations:
+        locs_by_step[loc.get("step_num", 0)].append(loc)
+    for step in steps_data:
+        step_locs = locs_by_step.get(step["step_num"], [])
+        found = locate_elements(step["url"], step_locs, viewport) if step_locs else []
+        if found:
+            step["screenshot_bytes"] = annotate_screenshot(step["screenshot_bytes"], found)
+        step["issue_crops"] = crop_to_issue_regions(step["screenshot_bytes"], found)
+    return steps_data, report_text, locations
+def run_journey(url: str, steps: list[dict]):
+    port = _find_free_port() if _FLASK_OK else None
+    desktop_steps, desktop_report, desktop_locs = _analyze_journey_viewport(url, steps, DESKTOP_VIEWPORT, "Desktop")
+    mobile_steps,  mobile_report,  mobile_locs  = _analyze_journey_viewport(url, steps, MOBILE_VIEWPORT,  "Mobile")
+    html = generate_journey_html(
+        url,
+        desktop_steps, desktop_report, desktop_locs,
+        mobile_steps,  mobile_report,  mobile_locs,
+        port=port,
+    )
+    with open("journey_report.html", "wb") as f:
+        f.write(_safe_bytes(html))
+    with open("journey_report.txt", "wb") as f:
+        f.write(_safe_bytes(
+            f"Journey starting at: {url}\n\n"
+            f"=== DESKTOP ===\n{desktop_report}\n\n"
+            f"=== MOBILE ===\n{mobile_report}"
+        ))
+    if port:
+        _REPORT_CONTEXT["report_text"] = (
+            f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
+            f"=== MOBILE VIEWPORT ===\n{mobile_report}"
+        )
+        _REPORT_CONTEXT["journey_html"] = html
+        _start_server(port)
+        report_url = f"http://localhost:{port}/journey-report"
+        print(f"\n  Report → {report_url}")
+        print("  Chat server running — press Ctrl+C to stop.\n")
+        webbrowser.open(report_url)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            print("\n  Done.")
+    else:
+        print("\n  HTML report saved → journey_report.html")
+        print("  Text report saved → journey_report.txt")
+# ── Screenshot-upload mode ────────────────────────────────────────
 def _to_png(img_bytes: bytes) -> bytes:
     img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
     out = io.BytesIO()
     img.save(out, format="PNG")
     return out.getvalue()
-
+def _load_img(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
 def call_claude_screenshot(screenshot_bytes: bytes, viewport_label: str = "desktop") -> str:
     print(f"  Sending {viewport_label} screenshot to Claude for heuristic evaluation ...")
     resized = _resize_screenshot(_to_png(screenshot_bytes))
@@ -1846,34 +1558,35 @@ def call_claude_screenshot(screenshot_bytes: bytes, viewport_label: str = "deskt
         ]}],
     )
     return response.content[0].text
-
-def call_claude_journey_screenshots(step_images: list[bytes], step_offset: int = 0, viewport_label: str = "desktop") -> str:
-    """Call Claude for a batch of journey screenshots. step_offset shifts the step numbers."""
-    total = len(step_images)
-    print(f"  Sending steps {step_offset}–{step_offset+total-1} ({total} screenshots) to Claude ...")
+def call_claude_journey_screenshots(step_paths: list[str], viewport_label: str = "desktop") -> str:
+    print(f"  Sending {len(step_paths)}-step {viewport_label} screenshot journey to Claude ...")
     client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
+    if len(step_paths) > 40:
+        print(f"  Warning: {len(step_paths)} screenshots is a large batch — compressing heavily.")
     content_blocks: list = [{
         "type": "text",
         "text": (
-            f"I am providing steps {step_offset} to {step_offset+total-1} of a user journey "
-            f"({viewport_label} viewport) as screenshots, in order. "
-            f"Please evaluate this segment against Nielsen's 10 heuristics.\n\n"
+            f"I am providing a {len(step_paths)}-step user journey ({viewport_label} viewport) "
+            f"as screenshots, in order. Please evaluate the entire flow end-to-end.\n\n"
         ),
     }]
-    for i, img_bytes in enumerate(step_images):
-        img = Image.open(io.BytesIO(_to_png(img_bytes))).convert("RGB")
+    for i, path in enumerate(step_paths):
+        img = Image.open(io.BytesIO(_to_png(_load_img(path)))).convert("RGB")
         img.thumbnail((900, 900), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=60, optimize=True)
         img_b64 = base64.standard_b64encode(buf.getvalue()).decode()
-        content_blocks.append({"type": "text", "text": f"--- STEP {step_offset + i} ---\nScreenshot:"})
+        content_blocks.append({
+            "type": "text",
+            "text": f"--- STEP {i}: {os.path.basename(path)} ---\nScreenshot:",
+        })
         content_blocks.append({
             "type": "image",
             "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
         })
     content_blocks.append({
         "type": "text",
-        "text": "Please evaluate this journey segment against Nielsen's 10 heuristics.",
+        "text": "Please evaluate this complete user journey against Nielsen's 10 heuristics.",
     })
     with client.messages.stream(
         model="claude-sonnet-4-6",
@@ -1888,213 +1601,157 @@ def call_claude_journey_screenshots(step_images: list[bytes], step_offset: int =
             print(".", end="", flush=True)
         print(" done.")
         return "".join(chunks)
-
-# ── Internal viewport helpers ─────────────────────────────────────
-def _analyze_viewport(url: str, viewport: dict, label: str) -> tuple[str, bytes, list]:
-    content, screenshot = playwright_scrape_and_screenshot(url, viewport)
-    formatted = format_for_prompt(content)
-    full_response = call_claude(formatted, label.lower())
-    report_text, locations = parse_response(full_response)
-    found = locate_elements(url, locations, viewport)
-    annotated_png = annotate_screenshot(screenshot, found)
-    return report_text, annotated_png, locations
-
-def _analyze_journey_viewport(
-    url: str, steps: list[dict], viewport: dict, label: str
-) -> tuple[list, str, list]:
-    steps_data = playwright_journey_scrape(url, steps, viewport)
-    full_response = call_claude_journey(steps_data, label.lower())
-    report_text, locations = parse_response(full_response)
-    locs_by_step = defaultdict(list)
-    for loc in locations:
-        locs_by_step[loc.get("step_num", 0)].append(loc)
-    for step in steps_data:
-        step_locs = locs_by_step.get(step["step_num"], [])
-        found = locate_elements(step["url"], step_locs, viewport) if step_locs else []
-        if found:
-            step["screenshot_bytes"] = annotate_screenshot(step["screenshot_bytes"], found)
-        step["issue_crops"] = crop_to_issue_regions(step["screenshot_bytes"], found)
-        step["locations"] = step_locs
-    return steps_data, report_text, locations
-
-# ── Public API functions ──────────────────────────────────────────
-def analyze_url(url: str, api_url: str = None) -> dict:
-    """
-    Run a single-page heuristic evaluation (desktop + mobile).
-    Returns a dict with keys:
-      html, desktop_report, mobile_report, desktop_locs, mobile_locs,
-      desktop_score, mobile_score, report_text
-    """
-    print(f"\n── Desktop analysis ──")
-    desktop_report, desktop_png, desktop_locs = _analyze_viewport(url, DESKTOP_VIEWPORT, "Desktop")
-    print(f"\n── Mobile analysis ──")
-    mobile_report, mobile_png, mobile_locs = _analyze_viewport(url, MOBILE_VIEWPORT, "Mobile")
-    html = generate_html(
-        url,
-        desktop_report, desktop_png, desktop_locs,
-        mobile_report,  mobile_png,  mobile_locs,
-        api_url=api_url,
-    )
-    return {
-        "html":           html,
-        "desktop_report": desktop_report,
-        "mobile_report":  mobile_report,
-        "desktop_locs":   desktop_locs,
-        "mobile_locs":    mobile_locs,
-        "desktop_score":  _extract_score(desktop_report),
-        "mobile_score":   _extract_score(mobile_report),
-        "report_text": (
-            f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
-            f"=== MOBILE VIEWPORT ===\n{mobile_report}"
-        ),
-    }
-
-def analyze_journey(url: str, steps: list[dict], api_url: str = None) -> dict:
-    """
-    Run a multi-step journey heuristic evaluation (desktop + mobile).
-    Returns a dict with keys:
-      html, desktop_report, mobile_report, desktop_locs, mobile_locs,
-      desktop_score, mobile_score, report_text
-    """
-    print(f"\n── Desktop journey analysis ──")
-    desktop_steps, desktop_report, desktop_locs = _analyze_journey_viewport(
-        url, steps, DESKTOP_VIEWPORT, "Desktop"
-    )
-    print(f"\n── Mobile journey analysis ──")
-    mobile_steps, mobile_report, mobile_locs = _analyze_journey_viewport(
-        url, steps, MOBILE_VIEWPORT, "Mobile"
-    )
-    html = generate_journey_html(
-        url,
-        desktop_steps, desktop_report, desktop_locs,
-        mobile_steps,  mobile_report,  mobile_locs,
-        api_url=api_url,
-    )
-    return {
-        "html":           html,
-        "desktop_report": desktop_report,
-        "mobile_report":  mobile_report,
-        "desktop_locs":   desktop_locs,
-        "mobile_locs":    mobile_locs,
-        "desktop_score":  _extract_score(desktop_report),
-        "mobile_score":   _extract_score(mobile_report),
-        "report_text": (
-            f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
-            f"=== MOBILE VIEWPORT ===\n{mobile_report}"
-        ),
-    }
-
-def analyze_screenshots(
-    desktop_bytes: bytes, mobile_bytes: bytes = None, api_url: str = None
-) -> dict:
-    """
-    Run a heuristic evaluation from uploaded screenshot bytes.
-    Returns a dict with keys: html, desktop_report, mobile_report, report_text
-    """
+def _collect_screenshot_files(prompt: str) -> list[str]:
+    print(f"\n  {prompt}")
+    print("    f — folder path (files sorted alphabetically)")
+    print("    l — comma-separated list of file paths")
+    choice = input("  Choice (f/l): ").strip().lower()
+    exts = {".png", ".jpg", ".jpeg", ".webp"}
+    if choice == "f":
+        folder = input("  Folder path: ").strip()
+        files = sorted(
+            os.path.join(folder, fn) for fn in os.listdir(folder)
+            if os.path.splitext(fn)[1].lower() in exts
+        )
+        if not files:
+            raise ValueError(f"No image files found in {folder}")
+        print(f"  Found {len(files)} image(s): {[os.path.basename(f) for f in files]}")
+        return files
+    else:
+        raw = input("  File paths (comma-separated): ").strip()
+        return [p.strip() for p in raw.split(",") if p.strip()]
+def run_from_screenshots(desktop_path: str, mobile_path: str = None):
+    port = _find_free_port() if _FLASK_OK else None
     print("\n── Desktop screenshot analysis ──")
-    desktop_png = _to_png(desktop_bytes)
-    desktop_report, desktop_locs = parse_response(call_claude_screenshot(desktop_png, "desktop"))
-    desktop_annotated, _ = annotate_screenshot_from_locs(desktop_png, desktop_locs)
-
-    if mobile_bytes:
+    desktop_bytes = _to_png(_load_img(desktop_path))
+    desktop_report, desktop_locs = parse_response(call_claude_screenshot(desktop_bytes, "desktop"))
+    desktop_annotated, _ = annotate_screenshot_from_locs(desktop_bytes, desktop_locs)
+    if mobile_path:
         print("\n── Mobile screenshot analysis ──")
-        mobile_png = _to_png(mobile_bytes)
-        mobile_report, mobile_locs = parse_response(call_claude_screenshot(mobile_png, "mobile"))
-        mobile_annotated, _ = annotate_screenshot_from_locs(mobile_png, mobile_locs)
+        mobile_bytes = _to_png(_load_img(mobile_path))
+        mobile_report, mobile_locs = parse_response(call_claude_screenshot(mobile_bytes, "mobile"))
+        mobile_annotated, _ = annotate_screenshot_from_locs(mobile_bytes, mobile_locs)
     else:
         mobile_report    = "(No mobile screenshot provided.)"
         mobile_annotated = desktop_annotated
         mobile_locs      = []
-
     html = generate_html(
         "Uploaded Screenshots",
         desktop_report, desktop_annotated, desktop_locs,
         mobile_report,  mobile_annotated,  mobile_locs,
-        api_url=api_url,
+        port=port,
     )
-    return {
-        "html":           html,
-        "desktop_report": desktop_report,
-        "mobile_report":  mobile_report,
-        "desktop_locs":   desktop_locs,
-        "mobile_locs":    mobile_locs,
-        "desktop_score":  _extract_score(desktop_report),
-        "mobile_score":   _extract_score(mobile_report),
-        "report_text": (
+    with open("heuristics_report.html", "wb") as f:
+        f.write(_safe_bytes(html))
+    with open("heuristics_report.txt", "wb") as f:
+        f.write(_safe_bytes(f"=== DESKTOP ===\n{desktop_report}\n\n=== MOBILE ===\n{mobile_report}"))
+    if port:
+        _REPORT_CONTEXT["report_text"] = (
             f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
             f"=== MOBILE VIEWPORT ===\n{mobile_report}"
-        ),
-    }
-
-_JOURNEY_BATCH_SIZE = 15
-
-def analyze_journey_screenshots(
-    step_images: list[bytes], api_url: str = None
-) -> dict:
-    """
-    Run a journey heuristic evaluation from a list of screenshot bytes (one per step).
-    Automatically batches large journeys (>15 steps) into groups for reliable evaluation.
-    Returns a dict with keys: html, report_text, locations, score
-    """
-    all_locations: list = []
-    all_issue_details: dict = {}
-    report_parts: list[str] = []
-    issue_offset = 0
-
-    for batch_start in range(0, len(step_images), _JOURNEY_BATCH_SIZE):
-        batch = step_images[batch_start:batch_start + _JOURNEY_BATCH_SIZE]
-        full_response = call_claude_journey_screenshots(batch, step_offset=batch_start)
-        report_text, locations = parse_response(full_response)
-        # Build issue_details for this batch and merge with offset keys
-        batch_details = _extract_issue_details(report_text)
-        for orig_num, detail in batch_details.items():
-            all_issue_details[orig_num + issue_offset] = detail
-        # Renumber report text to keep merged report text consistent
-        renumbered_report = _renumber_issues_in_report(report_text, issue_offset)
-        # Offset issue numbers in locations
-        for loc in locations:
-            loc["issue_number"] += issue_offset
-        if locations:
-            issue_offset = max(loc["issue_number"] for loc in locations)
-        all_locations.extend(locations)
-        report_parts.append(renumbered_report)
-
-    # Merge report texts into one cohesive document.
-    # Use penalty-based scoring from aggregated locations for accuracy —
-    # averaging Claude's per-batch self-reported scores inflates the result
-    # because each batch is scored in isolation without full journey context.
-    overall = _compute_score_from_locations(all_locations)
-    merged_report = _merge_batch_reports(report_parts, overall)
-
-    locs_by_step = defaultdict(list)
-    for loc in all_locations:
+        )
+        _REPORT_CONTEXT["report_html"] = html
+        _start_server(port)
+        report_url = f"http://localhost:{port}/report"
+        print(f"\n  Report → {report_url}")
+        print("  Chat server running — press Ctrl+C to stop.\n")
+        webbrowser.open(report_url)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            print("\n  Done.")
+    else:
+        print("\n  HTML report saved → heuristics_report.html")
+        print("  Text report saved → heuristics_report.txt")
+def run_journey_from_screenshots(step_paths: list[str]):
+    port = _find_free_port() if _FLASK_OK else None
+    full_response = call_claude_journey_screenshots(step_paths)
+    report_text, locations = parse_response(full_response)
+    from collections import defaultdict as _dd
+    locs_by_step = _dd(list)
+    for loc in locations:
         locs_by_step[loc.get("step_num", 0)].append(loc)
-
     steps_data = []
-    for i, img_bytes in enumerate(step_images):
-        png = _to_png(img_bytes)
+    for i, path in enumerate(step_paths):
+        img_bytes = _to_png(_load_img(path))
         step_locs = locs_by_step.get(i, [])
-        annotated, found = annotate_screenshot_from_locs(png, step_locs)
+        annotated, found = annotate_screenshot_from_locs(img_bytes, step_locs)
         steps_data.append({
             "step_num":         i,
-            "label":            f"Step {i}",
-            "url":              f"step_{i}",
+            "label":            os.path.basename(path),
+            "url":              path,
             "screenshot_bytes": annotated,
             "issue_crops":      crop_to_issue_regions(annotated, found),
-            "locations":        step_locs,
         })
-
     html = generate_journey_html(
-        "Uploaded Screenshots",
-        steps_data, merged_report, all_locations,
-        steps_data, merged_report, all_locations,
-        api_url=api_url,
-        issue_details_override=all_issue_details,
-        score_override=overall,
+        step_paths[0],
+        steps_data, report_text, locations,
+        steps_data, report_text, locations,
+        port=port,
     )
-    return {
-        "html":        html,
-        "report_text": merged_report,
-        "locations":   all_locations,
-        "score":       overall,
-    }
+    with open("journey_report.html", "wb") as f:
+        f.write(_safe_bytes(html))
+    with open("journey_report.txt", "wb") as f:
+        f.write(_safe_bytes(f"Journey from screenshots:\n\n{report_text}"))
+    if port:
+        _REPORT_CONTEXT["report_text"] = report_text
+        _REPORT_CONTEXT["journey_html"] = html
+        _start_server(port)
+        report_url = f"http://localhost:{port}/journey-report"
+        print(f"\n  Report → {report_url}")
+        print("  Chat server running — press Ctrl+C to stop.\n")
+        webbrowser.open(report_url)
+        try:
+            threading.Event().wait()
+        except KeyboardInterrupt:
+            print("\n  Done.")
+    else:
+        print("\n  HTML report saved → journey_report.html")
+        print("  Text report saved → journey_report.txt")
+# ── Main ─────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    print("\n=== Heuristic Funnel Analyzer ===")
+    print("\nMode:")
+    print("  1. Single page          (live URL)")
+    print("  2. Multi-step journey   (live URL)")
+    print("  3. Screenshots          (upload images)")
+    mode = input("\nChoose mode (1, 2, or 3): ").strip()
+    if mode == "3":
+        print("\nScreenshot type:")
+        print("  1. Single page  (desktop + optional mobile)")
+        print("  2. Journey      (ordered set of screenshots)")
+        sub = input("\nChoose (1 or 2): ").strip()
+        if sub == "2":
+            step_paths = _collect_screenshot_files(
+                "Provide your journey screenshots (one per step, in order):"
+            )
+            if not step_paths:
+                print("  No files provided — exiting.")
+            else:
+                print(f"\n  Running journey analysis on {len(step_paths)} screenshots ...")
+                run_journey_from_screenshots(step_paths)
+        else:
+            desktop_path = input("\n  Desktop screenshot path: ").strip()
+            mobile_inp   = input("  Mobile screenshot path  (Enter to skip): ").strip()
+            run_from_screenshots(desktop_path, mobile_inp or None)
+    else:
+        url = input("\nEnter the starting URL: ").strip()
+        if mode == "2":
+            print("\nHow would you like to define the journey?")
+            print("  1. Define steps interactively")
+            print("  2. Load steps from a JSON file")
+            source = input("\nChoose (1 or 2): ").strip()
+            if source == "2":
+                path = input("  Path to JSON file: ").strip()
+                steps = _load_journey_from_file(path)
+                print(f"  Loaded {len(steps)} steps from {path}")
+            else:
+                steps = _build_journey_interactively()
+            if not steps:
+                print("  No steps defined — running single page analysis instead.")
+                run(url)
+            else:
+                print(f"\n  Running journey analysis ({len(steps)} steps) ...")
+                run_journey(url, steps)
+        else:
+            run(url)

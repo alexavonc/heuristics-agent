@@ -330,7 +330,20 @@ def capture_with_login(
     steps: list[dict] = []
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            for _name in ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"]:
+                import shutil as _shutil
+                _sys_chrome = _shutil.which(_name)
+                if _sys_chrome:
+                    break
+            else:
+                _sys_chrome = None
+            try:
+                browser = p.chromium.launch(headless=True)
+            except Exception:
+                if _sys_chrome:
+                    browser = p.chromium.launch(executable_path=_sys_chrome, headless=True)
+                else:
+                    raise
             ctx = browser.new_context(viewport={"width": 1440, "height": 900})
             page = ctx.new_page()
 
