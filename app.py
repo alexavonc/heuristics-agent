@@ -5,7 +5,6 @@ import httpx
 import anthropic
 from flask import Flask, request, Response, jsonify, send_from_directory
 from flask_cors import CORS
-
 from analyze import (
     analyze_url,
     analyze_journey,
@@ -14,44 +13,42 @@ from analyze import (
     GENERAL_CHAT_SYSTEM_PROMPT,
     _safe_bytes,
 )
-from benchmark import run_benchmark
+
+try:
+    from benchmark import run_benchmark
+    BENCHMARK_AVAILABLE = True
+except Exception as _bench_err:
+    run_benchmark = None
+    BENCHMARK_AVAILABLE = False
+    print(f"[WARN] benchmark unavailable: {_bench_err}")
 
 app = Flask(__name__)
 CORS(app)
 
-API_KEY     = os.environ.get("ANTHROPIC_API_KEY", "")
+API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
-
 
 # ── Frontend ──────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
 
-
 # ── Health ────────────────────────────────────────────────────────
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
 
-
 # ── Analyze: live URL ─────────────────────────────────────────────
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
-    """
-    Body (JSON):
-      { "url": "https://...", "steps": [...] }   # steps optional — omit for single-page
-    """
     data  = request.get_json(force=True)
     url   = data.get("url")
-    steps = data.get("steps")  # present → journey mode
-
+    steps = data.get("steps")
     if not url:
         return jsonify({"error": "url is required"}), 400
-
     try:
         if steps:
             result = analyze_journey(url, steps, api_url=API_BASE_URL)
@@ -59,7 +56,6 @@ def api_analyze():
             result = analyze_url(url, api_url=API_BASE_URL)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
     report_id = str(uuid.uuid4())
     _reports[report_id] = result
     return jsonify({
@@ -68,19 +64,10 @@ def api_analyze():
         "mobile_score":  result.get("mobile_score"),
     })
 
-
 # ── Analyze: screenshot upload ────────────────────────────────────
 @app.route("/api/analyze/screenshots", methods=["POST"])
 def api_analyze_screenshots():
-    """
-    Multipart form fields:
-      journey=true|false
-      desktop  — desktop screenshot file (single-page mode)
-      mobile   — mobile screenshot file  (optional, single-page mode)
-      steps[]  — multiple screenshot files in order (journey mode)
-    """
     journey = request.form.get("journey", "false").lower() == "true"
-
     try:
         if journey:
             files       = request.files.getlist("steps[]")
@@ -100,16 +87,14 @@ def api_analyze_screenshots():
             )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
     report_id = str(uuid.uuid4())
     _reports[report_id] = result
     return jsonify({
         "report_id":     report_id,
         "desktop_score": result.get("desktop_score"),
         "mobile_score":  result.get("mobile_score"),
-        "score":         result.get("score"),  # journey screenshot mode
+        "score":         result.get("score"),
     })
-
 
 # ── Fetch report HTML ─────────────────────────────────────────────
 @app.route("/api/report/<report_id>")
@@ -119,7 +104,6 @@ def get_report(report_id):
         return jsonify({"error": "Report not found"}), 404
     html = report.get("html", "<h1>No HTML available</h1>")
     return Response(_safe_bytes(html), 200, {"Content-Type": "text/html; charset=utf-8"})
-
 
 # ── Fetch report JSON data ────────────────────────────────────────
 @app.route("/api/report/<report_id>/data")
@@ -136,23 +120,15 @@ def get_report_data(report_id):
         "mobile_locs":   report.get("mobile_locs", []),
     })
 
-
 # ── Chat (SSE stream) ─────────────────────────────────────────────
 @app.route("/api/chat", methods=["POST"])
 def chat():
-    """
-    Body (JSON):
-      { "report_id": "...", "messages": [{role, content}, ...] }
-    Returns: text/event-stream
-    """
     data      = request.get_json(force=True)
     report_id = data.get("report_id", "")
     messages  = data.get("messages", [])
-
     report      = _reports.get(report_id, {})
     report_text = report.get("report_text", "No report available.")
     system      = GENERAL_CHAT_SYSTEM_PROMPT.format(report_text=report_text)
-
     def _gen():
         client = anthropic.Anthropic(
             api_key=API_KEY,
@@ -167,68 +143,48 @@ def chat():
             for text in stream.text_stream:
                 yield f"data: {json.dumps({'text': text})}\n\n"
         yield "data: [DONE]\n\n"
-
     return Response(
         _gen(),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-
 # ── Benchmark (SSE stream) ─────────────────────────────────────────
 @app.route("/api/benchmark", methods=["POST"])
 def api_benchmark():
-    """
-    Body (JSON):
-      { "report_id": "..." }
-    Returns: text/event-stream
-      data: {"type": "progress", "message": "..."}   (0-N times)
-      data: {"type": "complete", "report_id": "..."}  (once, on success)
-      data: {"type": "error",    "message": "..."}    (once, on failure)
-    """
+    if not BENCHMARK_AVAILABLE:
+        return jsonify({"error": "Benchmark module not available"}), 503
+
     data      = request.get_json(force=True)
     report_id = data.get("report_id", "")
-
     report = _reports.get(report_id)
     if not report:
         return jsonify({"error": "Report not found"}), 404
-
     report_text = report.get("report_text", "")
     if not report_text:
         return jsonify({"error": "No report text available for benchmarking"}), 400
 
     def _gen():
         import json as _json
-
-        def _prog(msg: str):
-            yield f"data: {_json.dumps({'type': 'progress', 'message': msg})}\n\n"
-
         try:
             messages = []
-
             def _cb(msg):
                 messages.append(msg)
-
             result = run_benchmark(
                 report_text = report_text,
                 api_url     = API_BASE_URL,
                 progress_cb = _cb,
             )
-            # Yield any buffered progress messages (run_benchmark is synchronous,
-            # so we flush them all at once after it completes — the client will
-            # show them in order before the "complete" event.)
             for m in messages:
                 yield f"data: {_json.dumps({'type': 'progress', 'message': m})}\n\n"
-
             bench_id = str(uuid.uuid4())
             _reports[bench_id] = {
                 "html":            result["html"],
-                "report_text":     "",   # no chattable text for benchmark reports
+                "report_text":     "",
                 "product_context": result.get("product_context", {}),
                 "competitors":     result.get("competitors", []),
             }
             yield f"data: {_json.dumps({'type': 'complete', 'report_id': bench_id})}\n\n"
-
         except Exception as exc:
             yield f"data: {_json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
 
@@ -237,7 +193,6 @@ def api_benchmark():
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
