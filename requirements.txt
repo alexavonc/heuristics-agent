@@ -1,3 +1,4 @@
+# cache-bust: 1
 anthropic>=0.40.0
 flask>=3.0.0
 flask-cors>=4.0.0
