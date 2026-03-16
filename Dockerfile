@@ -1,5 +1,3 @@
-cd /Users/alexavoncharles/Documents/GitHub/heuristics-agent
-cat > Dockerfile << 'EOF'
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -23,4 +21,3 @@ ENV PORT=8080
 EXPOSE 8080
 
 CMD ["python", "app.py"]
-EOF
