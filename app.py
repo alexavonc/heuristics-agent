@@ -1,10 +1,17 @@
 import os
 import queue
+import subprocess
+import sys
 import threading
 import uuid
 import json
 import httpx
 import anthropic
+
+# Ensure Chromium matches the installed playwright version (bypasses Docker layer cache mismatch)
+print("Installing/verifying Playwright Chromium...", flush=True)
+subprocess.run(["playwright", "install", "chromium"], check=False)
+print("Chromium ready.", flush=True)
 from flask import Flask, request, Response, jsonify, send_from_directory
 from flask_cors import CORS
 
