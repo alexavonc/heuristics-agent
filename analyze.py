@@ -370,6 +370,205 @@ def _chat_panel_html(port: int) -> str:
   }});
   </script>
 """
+# ── API-mode chat panel (no localhost port, uses /api/chat) ──────
+def _api_chat_panel_html() -> str:
+    return """<div id="chat-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:998;"></div>
+<div id="chat-panel" style="display:none;position:fixed;right:0;top:0;width:440px;max-width:100vw;height:100vh;background:#fff;box-shadow:-4px 0 28px rgba(0,0,0,.18);z-index:999;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="background:#0f172a;color:#f8fafc;padding:1rem 1.25rem;display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0;">
+    <div>
+      <div style="font-weight:700;font-size:.95rem;">&#128172; Ask Claude</div>
+      <div style="font-size:.72rem;color:#94a3b8;margin-top:.2rem;">Select any text on the page, then ask about it</div>
+    </div>
+    <button id="cp-close" style="flex-shrink:0;margin-left:.75rem;background:none;border:none;color:#94a3b8;font-size:1.5rem;line-height:1;cursor:pointer;padding:0;">&times;</button>
+  </div>
+  <div id="cp-msgs" style="flex:1;overflow-y:auto;padding:1rem;display:flex;flex-direction:column;gap:.75rem;"></div>
+  <div style="padding:.75rem;border-top:1px solid #e2e8f0;display:flex;flex-direction:column;gap:.4rem;flex-shrink:0;background:#fff;">
+    <div id="cp-ctx" style="display:none;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:.45rem .6rem;font-size:.76rem;color:#1e40af;">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;margin-bottom:.2rem;">
+        <span style="font-weight:700;font-size:.7rem;text-transform:uppercase;letter-spacing:.05em;color:#3b82f6;">Selected context</span>
+        <button id="cp-ctx-clear" style="background:none;border:none;color:#93c5fd;cursor:pointer;font-size:1rem;line-height:1;padding:0;">&times;</button>
+      </div>
+      <div id="cp-ctx-text" style="overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;line-height:1.4;"></div>
+    </div>
+    <div style="display:flex;gap:.5rem;">
+      <textarea id="cp-input" rows="2" placeholder="Ask about this report..."
+        style="flex:1;padding:.5rem .75rem;border:1.5px solid #e2e8f0;border-radius:8px;font-size:.88rem;resize:none;font-family:inherit;outline:none;line-height:1.4;"></textarea>
+      <button id="cp-send"
+        style="align-self:flex-end;padding:.55rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;cursor:pointer;font-weight:600;font-size:.88rem;">Send</button>
+    </div>
+  </div>
+</div>
+<script>
+var _chist=[],_cbusy=false,_selCtx='';
+function _gel(id){return document.getElementById(id);}
+function _cmsg(role,text){
+  var d=document.createElement('div');
+  d.style.cssText=role==='user'
+    ?'align-self:flex-end;background:#0f172a;color:#fff;padding:.45rem .75rem;border-radius:12px 12px 2px 12px;max-width:85%;font-size:.88rem;white-space:pre-wrap;word-wrap:break-word;'
+    :'align-self:flex-start;background:#f1f5f9;color:#1e293b;padding:.45rem .75rem;border-radius:12px 12px 12px 2px;max-width:90%;font-size:.88rem;white-space:pre-wrap;word-wrap:break-word;line-height:1.6;';
+  d.textContent=text;
+  var m=_gel('cp-msgs');m.appendChild(d);m.scrollTop=m.scrollHeight;return d;
+}
+function _setCtx(text){
+  _selCtx=text||'';
+  var el=_gel('cp-ctx');
+  if(_selCtx){_gel('cp-ctx-text').textContent=_selCtx;el.style.display='block';}
+  else{el.style.display='none';_gel('cp-ctx-text').textContent='';}
+}
+document.addEventListener('mouseup',function(e){
+  if(e.target.closest&&e.target.closest('#chat-panel'))return;
+  var s=window.getSelection().toString().trim();
+  if(s.length>10)_setCtx(s);
+});
+window.openChat=function(){
+  _gel('chat-overlay').style.display='block';
+  _gel('chat-panel').style.display='flex';
+  if(_chist.length===0){
+    _cmsg('assistant','Hi! Ask me anything about this evaluation. You can also select text anywhere on the page before sending to use it as context.');
+  }
+  var inp=_gel('cp-input');if(inp)inp.focus();
+};
+window.closeChat=function(){
+  _gel('chat-overlay').style.display='none';
+  _gel('chat-panel').style.display='none';
+};
+async function _cpSend(){
+  if(_cbusy)return;
+  var inp=_gel('cp-input'),txt=inp.value.trim();
+  if(!txt)return;
+  var fullMsg=_selCtx?'Regarding this from the report:\\n"'+_selCtx+'"\\n\\n'+txt:txt;
+  inp.value='';_setCtx('');
+  _cmsg('user',fullMsg);
+  _chist.push({role:'user',content:fullMsg});
+  var bot=_cmsg('assistant','...');
+  _cbusy=true;
+  var sendBtn=_gel('cp-send');if(sendBtn)sendBtn.disabled=true;
+  try{
+    var resp=await fetch('/api/chat',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({report_id:window._reportId||'',messages:_chist})
+    });
+    var reader=resp.body.getReader(),dec=new TextDecoder(),buf='',acc='';
+    for(;;){
+      var r=await reader.read();if(r.done)break;
+      buf+=dec.decode(r.value,{stream:true});
+      var lines=buf.split('\\n');buf=lines.pop();
+      for(var i=0;i<lines.length;i++){
+        var ln=lines[i];if(!ln.startsWith('data: '))continue;
+        var chunk=ln.slice(6).trim();if(chunk==='[DONE]')break;
+        try{acc+=JSON.parse(chunk).text;bot.textContent=acc;_gel('cp-msgs').scrollTop=99999;}catch(ex){}
+      }
+    }
+    bot.textContent=acc||'(empty response)';
+    _chist.push({role:'assistant',content:acc});
+  }catch(err){
+    bot.textContent='Error: could not reach chat server.';
+  }
+  _cbusy=false;if(sendBtn)sendBtn.disabled=false;
+  var inp2=_gel('cp-input');if(inp2)inp2.focus();
+}
+document.addEventListener('click',function(e){
+  var t=e.target;
+  if(t===_gel('chat-overlay')){window.closeChat();return;}
+  if(t.closest('#cp-close')){window.closeChat();return;}
+  if(t.closest('#cp-ctx-clear')){_setCtx('');return;}
+  if(t.closest('#cp-send')){_cpSend();return;}
+  if(t.closest('#open-chat-btn')){window.openChat();return;}
+});
+document.addEventListener('keydown',function(e){
+  if(_gel('cp-input')&&e.target===_gel('cp-input')&&e.key==='Enter'&&!e.shiftKey){
+    e.preventDefault();_cpSend();
+  }
+});
+</script>
+"""
+
+# ── API-mode benchmark panel ──────────────────────────────────────
+def _bench_panel_html() -> str:
+    return """<div id="bench-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:998;"></div>
+<div id="bench-panel" style="display:none;position:fixed;right:0;top:0;width:440px;max-width:100vw;height:100vh;background:#fff;box-shadow:-4px 0 28px rgba(0,0,0,.18);z-index:999;flex-direction:column;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <div style="background:#0f172a;color:#f8fafc;padding:1rem 1.25rem;display:flex;justify-content:space-between;align-items:flex-start;flex-shrink:0;">
+    <div>
+      <div style="font-weight:700;font-size:.95rem;">&#128202; Competitive Benchmark</div>
+      <div style="font-size:.72rem;color:#94a3b8;margin-top:.2rem;">Compare against top competitors</div>
+    </div>
+    <button onclick="closeBench()" style="flex-shrink:0;margin-left:.75rem;background:none;border:none;color:#94a3b8;font-size:1.5rem;line-height:1;cursor:pointer;padding:0;">&times;</button>
+  </div>
+  <div id="bench-body" style="flex:1;overflow-y:auto;padding:1.25rem;display:flex;flex-direction:column;gap:.6rem;"></div>
+  <div style="padding:.875rem 1.25rem;border-top:1px solid #e2e8f0;flex-shrink:0;">
+    <button id="bench-start-btn" onclick="startBench()"
+      style="width:100%;padding:.6rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-weight:600;font-size:.88rem;cursor:pointer;font-family:inherit;">
+      &#9654; Start Analysis
+    </button>
+    <div id="bench-result-link" style="display:none;margin-top:.6rem;text-align:center;">
+      <a id="bench-report-link" href="#" target="_blank"
+        style="color:#6366f1;font-weight:600;font-size:.88rem;text-decoration:none;">
+        &#128203; View Benchmark Report &rarr;
+      </a>
+    </div>
+  </div>
+</div>
+<script>
+function closeBench(){
+  document.getElementById('bench-overlay').style.display='none';
+  document.getElementById('bench-panel').style.display='none';
+}
+function openBench(){
+  document.getElementById('bench-overlay').style.display='block';
+  document.getElementById('bench-panel').style.display='flex';
+}
+document.getElementById('bench-overlay').addEventListener('click', closeBench);
+document.getElementById('open-bench-btn').addEventListener('click', openBench);
+async function startBench(){
+  var btn=document.getElementById('bench-start-btn');
+  var body=document.getElementById('bench-body');
+  var resLink=document.getElementById('bench-result-link');
+  btn.disabled=true;btn.textContent='Running...';
+  body.innerHTML='';resLink.style.display='none';
+  function addMsg(text,color){
+    var d=document.createElement('div');
+    d.style.cssText='font-size:.82rem;color:'+(color||'#475569')+';padding:.3rem 0;border-bottom:1px solid #f1f5f9;line-height:1.5;';
+    d.textContent=text;body.appendChild(d);body.scrollTop=body.scrollHeight;
+  }
+  try{
+    var resp=await fetch('/api/benchmark',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({report_id:window._reportId||''})
+    });
+    var reader=resp.body.getReader(),dec=new TextDecoder(),buf='';
+    for(;;){
+      var r=await reader.read();if(r.done)break;
+      buf+=dec.decode(r.value,{stream:true});
+      var lines=buf.split('\\n');buf=lines.pop();
+      for(var i=0;i<lines.length;i++){
+        var ln=lines[i];if(!ln.startsWith('data: '))continue;
+        var raw=ln.slice(6).trim();
+        try{
+          var ev=JSON.parse(raw);
+          if(ev.type==='progress'){addMsg('&#10003; '+ev.message,'#475569');}
+          else if(ev.type==='complete'){
+            addMsg('Benchmark complete!','#16a34a');
+            var link=document.getElementById('bench-report-link');
+            link.href='/api/report/'+ev.report_id;
+            resLink.style.display='block';
+            btn.textContent='&#9654; Run Again';btn.disabled=false;
+          }else if(ev.type==='error'){
+            addMsg('Error: '+ev.message,'#dc2626');
+            btn.textContent='&#9654; Retry';btn.disabled=false;
+          }
+        }catch(ex){}
+      }
+    }
+  }catch(err){
+    addMsg('Failed to connect to benchmark service.','#dc2626');
+    btn.textContent='&#9654; Retry';btn.disabled=false;
+  }
+}
+</script>
+"""
+
 # ── Playwright browser launch with system-chromium fallback ─────
 def _launch_browser(p, headless: bool = True):
     """
@@ -1119,9 +1318,17 @@ def _modal_html() -> str:
 })();
 </script>
 """
-def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port: int = None) -> str:
-    chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if port else ""
-    chat_panel = _chat_panel_html(port) if port else ""
+def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port: int = None, api_url: str = None) -> str:
+    _has_chat = port or api_url
+    chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if _has_chat else ""
+    bench_btn = """<button id="open-bench-btn" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">&#128202; Benchmark</button>""" if api_url else ""
+    if port:
+        chat_panel = _chat_panel_html(port)
+    elif api_url:
+        chat_panel = _api_chat_panel_html()
+    else:
+        chat_panel = ""
+    bench_panel = _bench_panel_html() if api_url else ""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1173,8 +1380,10 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port:
     <button class="vp-tab active" onclick="switchVP('desktop',this)">&#128760; Desktop (1440px)</button>
     <button class="vp-tab" onclick="switchVP('mobile',this)">&#128241; Mobile (390px)</button>
     {chat_btn}
+    {bench_btn}
   </div>
   <script>
+  window._reportId = '__REPORT_ID__';
   function switchVP(name,btn){{
     document.getElementById('vp-desktop').style.display=name==='desktop'?'':'none';
     document.getElementById('vp-mobile').style.display=name==='mobile'?'':'none';
@@ -1185,6 +1394,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port:
   <main>{body}
   </main>
   {chat_panel}
+  {bench_panel}
   {_modal_html()}
 </body>
 </html>"""
@@ -1253,7 +1463,7 @@ def generate_html(
     url: str,
     desktop_report: str, desktop_png: bytes, desktop_locs: list,
     mobile_report: str,  mobile_png: bytes,  mobile_locs: list,
-    port: int = None,
+    port: int = None, api_url: str = None,
 ) -> str:
     desktop_section = _single_viewport_section(desktop_report, desktop_png, desktop_locs, "desktop", port)
     mobile_section  = _single_viewport_section(mobile_report,  mobile_png,  mobile_locs,  "mobile",  port)
@@ -1262,6 +1472,7 @@ def generate_html(
         subtitle=url,
         body=_viewport_tab_html(desktop_section, mobile_section),
         port=port,
+        api_url=api_url,
     )
 # ── Step 7b: Journey HTML report ────────────────────────────────
 def _single_journey_section(
@@ -1355,7 +1566,7 @@ def generate_journey_html(
     start_url: str,
     desktop_steps: list[dict], desktop_report: str, desktop_locs: list,
     mobile_steps: list[dict],  mobile_report: str,  mobile_locs: list,
-    port: int = None,
+    port: int = None, api_url: str = None,
 ) -> str:
     desktop_section = _single_journey_section(desktop_steps, desktop_report, desktop_locs, "desktop", port)
     mobile_section  = _single_journey_section(mobile_steps,  mobile_report,  mobile_locs,  "mobile",  port)
@@ -1387,6 +1598,7 @@ def generate_journey_html(
     """,
         body=_viewport_tab_html(desktop_section, mobile_section),
         port=port,
+        api_url=api_url,
     )
 # ── Journey step builder ─────────────────────────────────────────
 def _build_journey_interactively() -> list[dict]:
@@ -1720,6 +1932,7 @@ def analyze_url(url: str, api_url: str = None) -> dict:
         url,
         desktop_report, desktop_png, desktop_locs,
         mobile_report,  mobile_png,  mobile_locs,
+        api_url=api_url,
     )
     report_text = (
         f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
@@ -1742,6 +1955,7 @@ def analyze_journey(url: str, steps: list[dict], api_url: str = None) -> dict:
         url,
         desktop_steps, desktop_report, desktop_locs,
         mobile_steps,  mobile_report,  mobile_locs,
+        api_url=api_url,
     )
     report_text = (
         f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
@@ -1773,6 +1987,7 @@ def analyze_screenshots(desktop_bytes: bytes, mobile_bytes: bytes = None, api_ur
         "Uploaded Screenshots",
         desktop_report, desktop_annotated, desktop_locs,
         mobile_report,  mobile_annotated,  mobile_locs,
+        api_url=api_url,
     )
     report_text = (
         f"=== DESKTOP VIEWPORT ===\n{desktop_report}\n\n"
@@ -1842,6 +2057,7 @@ def analyze_journey_screenshots(step_images: list[bytes], api_url: str = None) -
         "Uploaded Screenshots",
         steps_data, report_text, locations,
         steps_data, report_text, locations,
+        api_url=api_url,
     )
     return {
         "html":           html,
