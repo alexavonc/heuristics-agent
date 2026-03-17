@@ -518,8 +518,10 @@ function openBench(){
   document.getElementById('bench-overlay').style.display='block';
   document.getElementById('bench-panel').style.display='flex';
 }
-document.getElementById('bench-overlay').addEventListener('click', closeBench);
-document.getElementById('open-bench-btn').addEventListener('click', openBench);
+document.addEventListener('click',function(e){
+  if(e.target&&e.target.id==='bench-overlay'){closeBench();return;}
+  if(e.target&&e.target.closest&&e.target.closest('#open-bench-btn')){openBench();return;}
+});
 async function startBench(){
   var btn=document.getElementById('bench-start-btn');
   var body=document.getElementById('bench-body');
@@ -742,13 +744,16 @@ def call_claude(formatted: str, viewport_label: str = "desktop") -> str:
         api_key=API_KEY,
         http_client=httpx.Client(verify=False),
     )
-    response = client.messages.create(
+    with client.messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=4096,
+        max_tokens=8192,
         system=HEURISTICS_PROMPT,
         messages=[{"role": "user", "content": f"Please evaluate this {viewport_label} page:\n\n{formatted}"}],
-    )
-    return response.content[0].text
+    ) as stream:
+        chunks = []
+        for text in stream.text_stream:
+            chunks.append(text)
+        return "".join(chunks)
 # ── Step 3b: Journey evaluation (with screenshots) ───────────────
 def call_claude_journey(steps_data: list[dict], viewport_label: str = "desktop") -> str:
     print(f"  Sending {len(steps_data)}-step {viewport_label} journey to Claude for evaluation ...")
@@ -1322,6 +1327,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port:
     _has_chat = port or api_url
     chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if _has_chat else ""
     bench_btn = """<button id="open-bench-btn" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">&#128202; Benchmark</button>""" if api_url else ""
+    new_analysis_btn = """<a href="/" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;font-size:.85rem;font-weight:600;text-decoration:none;white-space:nowrap;transition:all .15s;" onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>""" if api_url else ""
     if port:
         chat_panel = _chat_panel_html(port)
     elif api_url:
@@ -1381,6 +1387,7 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port:
     <button class="vp-tab" onclick="switchVP('mobile',this)">&#128241; Mobile (390px)</button>
     {chat_btn}
     {bench_btn}
+    {new_analysis_btn}
   </div>
   <script>
   window._reportId = '__REPORT_ID__';
@@ -1764,16 +1771,19 @@ def call_claude_screenshot(screenshot_bytes: bytes, viewport_label: str = "deskt
     resized = _resize_screenshot(_to_png(screenshot_bytes))
     img_b64 = base64.standard_b64encode(resized).decode()
     client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
-    response = client.messages.create(
+    with client.messages.stream(
         model="claude-sonnet-4-6",
-        max_tokens=4096,
+        max_tokens=8192,
         system=HEURISTICS_PROMPT,
         messages=[{"role": "user", "content": [
             {"type": "text", "text": f"Please evaluate this {viewport_label} page screenshot:"},
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
         ]}],
-    )
-    return response.content[0].text
+    ) as stream:
+        chunks = []
+        for text in stream.text_stream:
+            chunks.append(text)
+        return "".join(chunks)
 def call_claude_journey_screenshots(step_paths: list[str], viewport_label: str = "desktop") -> str:
     print(f"  Sending {len(step_paths)}-step {viewport_label} screenshot journey to Claude ...")
     client = anthropic.Anthropic(api_key=API_KEY, http_client=httpx.Client(verify=False))
