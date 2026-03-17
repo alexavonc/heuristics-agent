@@ -1783,7 +1783,29 @@ def _analyze_viewport(url: str, viewport: dict, label: str) -> tuple[str, bytes,
     report_text, locations = parse_response(full_response)
     found = locate_elements(url, locations, viewport)
     annotated_png = annotate_screenshot(screenshot, found)
-    return report_text, annotated_png, locations
+    # Overwrite bbox_pct with REAL located pixel coordinates so JS overlays
+    # align exactly with the annotated boxes on the image.
+    full_w, full_h = Image.open(io.BytesIO(screenshot)).size
+    real_coords = {item[0]: item[1] for item in found}  # {issue_number: {x,y,width,height}}
+    updated_locs = []
+    for loc in locations:
+        n = loc["issue_number"]
+        if n in real_coords:
+            b = real_coords[n]
+            updated_locs.append({
+                **loc,
+                "bbox_pct": {
+                    "x": max(0.0, b["x"] / full_w),
+                    "y": max(0.0, b["y"] / full_h),
+                    "w": min(1.0, b["width"]  / full_w),
+                    "h": min(1.0, b["height"] / full_h),
+                },
+            })
+        else:
+            # Could not locate on page — keep Claude's estimate as fallback
+            # but clear bbox_pct if it's suspiciously zeroed
+            updated_locs.append(loc)
+    return report_text, annotated_png, updated_locs
 def run(url: str):
     port = _find_free_port() if _FLASK_OK else None
     desktop_report, desktop_png, desktop_locs = _analyze_viewport(url, DESKTOP_VIEWPORT, "Desktop")
