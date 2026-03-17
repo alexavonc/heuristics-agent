@@ -120,13 +120,6 @@
     .loading-step.done .ls-dot { background: #22c55e; }
     .loading-step.active .ls-dot { background: #0f172a; }
 
-    /* Report viewer */
-    .report-card { display: none; }
-    .report-card.show { display: block; }
-    .report-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1rem; flex-wrap: wrap; gap: .5rem; }
-    .report-scores { display: flex; gap: .75rem; }
-    .score-chip { display: flex; align-items: center; gap: .35rem; padding: .3rem .7rem; border-radius: 9999px; font-size: .78rem; font-weight: 600; background: #f1f5f9; color: #374151; border: 1px solid #e2e8f0; }
-    .report-iframe { width: 100%; height: 800px; border: 1px solid #e2e8f0; border-radius: 8px; }
 
     /* Error */
     .error-banner { display: none; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: .75rem 1rem; font-size: .875rem; color: #dc2626; margin-bottom: 1rem; }
@@ -256,27 +249,6 @@
     </div>
   </div>
 
-  <!-- Report -->
-  <div class="report-card" id="report-card">
-    <div class="report-header">
-      <div class="card-title" style="margin:0">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Evaluation Complete
-      </div>
-      <div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
-        <div class="report-scores" id="report-scores"></div>
-        <button class="btn-secondary" onclick="openFullReport()">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-          Open full report
-        </button>
-        <button class="btn-secondary" onclick="resetForm()">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 102.13-9.36L1 10"/></svg>
-          New analysis
-        </button>
-      </div>
-    </div>
-    <iframe class="report-iframe" id="report-iframe" src="about:blank"></iframe>
-  </div>
 
 </div>
 
@@ -530,34 +502,14 @@ function showReport(reportId, desktopScore, mobileScore) {
   _currentReportId = reportId;
   _currentReportUrl = '/api/report/' + reportId;
   document.getElementById('loading-card').classList.remove('show');
-  // Scores
-  var scoresEl = document.getElementById('report-scores');
-  scoresEl.innerHTML = '';
-  function scoreColor(s) {
-    if (!s && s !== 0) return '#64748b';
-    if (s >= 7) return '#16a34a'; if (s >= 5) return '#d97706'; return '#dc2626';
-  }
-  if (desktopScore !== null && desktopScore !== undefined) {
-    scoresEl.innerHTML += '<div class="score-chip"><span style="font-size:.7rem;color:#64748b">🖥</span>'
-      +'<span style="color:'+scoreColor(desktopScore)+'">'+desktopScore.toFixed(1)+'</span><span style="color:#94a3b8;font-weight:400">/10</span></div>';
-  }
-  if (mobileScore !== null && mobileScore !== undefined) {
-    scoresEl.innerHTML += '<div class="score-chip"><span style="font-size:.7rem;color:#64748b">📱</span>'
-      +'<span style="color:'+scoreColor(mobileScore)+'">'+mobileScore.toFixed(1)+'</span><span style="color:#94a3b8;font-weight:400">/10</span></div>';
-  }
-  document.getElementById('report-iframe').src = _currentReportUrl;
-  document.getElementById('report-card').classList.add('show');
-}
-
-function openFullReport() {
-  if (_currentReportUrl) window.open(_currentReportUrl, '_blank');
+  window.open(_currentReportUrl, '_blank');
+  resetForm();
 }
 
 function resetForm() {
-  document.getElementById('report-card').classList.remove('show');
   document.getElementById('form-card').style.display = '';
-  document.getElementById('report-iframe').src = 'about:blank';
   _currentReportId = null;
+  _currentReportUrl = null;
 }
 
 function showError(msg) {
