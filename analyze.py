@@ -503,6 +503,7 @@ def _bench_panel_html() -> str:
     <button id="bench-start-btn" onclick="startBench()"
       style="width:100%;padding:.6rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-weight:600;font-size:.88rem;cursor:pointer;font-family:inherit;">
       &#9654; Start Analysis
+
     </button>
     <div id="bench-result-link" style="display:none;margin-top:.6rem;text-align:center;">
       <a id="bench-report-link" href="#" target="_blank"
@@ -512,6 +513,9 @@ def _bench_panel_html() -> str:
     </div>
   </div>
 </div>
+<style>
+@keyframes _bspin{to{transform:rotate(360deg)}}
+</style>
 <script>
 function closeBench(){
   document.getElementById('bench-overlay').style.display='none';
@@ -529,13 +533,35 @@ async function startBench(){
   var btn=document.getElementById('bench-start-btn');
   var body=document.getElementById('bench-body');
   var resLink=document.getElementById('bench-result-link');
-  btn.disabled=true;btn.textContent='Running...';
+  btn.disabled=true;btn.textContent='Running\u2026';
   body.innerHTML='';resLink.style.display='none';
-  function addMsg(text,color){
-    var d=document.createElement('div');
-    d.style.cssText='font-size:.82rem;color:'+(color||'#475569')+';padding:.3rem 0;border-bottom:1px solid #f1f5f9;line-height:1.5;';
-    d.textContent=text;body.appendChild(d);body.scrollTop=body.scrollHeight;
+
+  var _activeRow=null;
+
+  var _SPINNER='<span class="_bi" style="display:inline-block;width:15px;height:15px;border:2px solid #e2e8f0;border-top-color:#6366f1;border-radius:50%;animation:_bspin .7s linear infinite;flex-shrink:0;margin-top:1px;"></span>';
+  var _TICK='<span class="_bi" style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;background:#16a34a;border-radius:50%;flex-shrink:0;margin-top:1px;"><svg width="9" height="7" viewBox="0 0 9 7" fill="none"><polyline points="1,3.5 3.5,6 8,1" stroke="white" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>';
+  var _ERR='<span class="_bi" style="display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;background:#dc2626;border-radius:50%;flex-shrink:0;margin-top:1px;font-size:11px;color:#fff;line-height:1;">!</span>';
+
+  function _esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+  function _markDone(row,ok){
+    if(!row)return;
+    var bi=row.querySelector('._bi');
+    if(bi){
+      var tmp=document.createElement('span');
+      tmp.innerHTML=ok===false?_ERR:_TICK;
+      bi.replaceWith(tmp.firstChild);
+    }
   }
+
+  function _addRow(text,color,icon){
+    var row=document.createElement('div');
+    row.style.cssText='display:flex;align-items:flex-start;gap:.55rem;padding:.42rem 0;border-bottom:1px solid #f1f5f9;';
+    row.innerHTML=(icon||_SPINNER)+'<span style="font-size:.81rem;color:'+(color||'#475569')+';line-height:1.5;">'+_esc(text)+'</span>';
+    body.appendChild(row);body.scrollTop=body.scrollHeight;
+    return row;
+  }
+
   try{
     var resp=await fetch('/api/benchmark',{
       method:'POST',
@@ -546,29 +572,36 @@ async function startBench(){
     for(;;){
       var r=await reader.read();if(r.done)break;
       buf+=dec.decode(r.value,{stream:true});
-      var lines=buf.split('\\n');buf=lines.pop();
+      var lines=buf.split('\n');buf=lines.pop();
       for(var i=0;i<lines.length;i++){
         var ln=lines[i];if(!ln.startsWith('data: '))continue;
         var raw=ln.slice(6).trim();
         try{
           var ev=JSON.parse(raw);
-          if(ev.type==='progress'){addMsg('&#10003; '+ev.message,'#475569');}
-          else if(ev.type==='complete'){
-            addMsg('Benchmark complete!','#16a34a');
+          if(ev.type==='progress'){
+            _markDone(_activeRow,true);
+            _activeRow=_addRow(ev.message);
+          }else if(ev.type==='complete'){
+            _markDone(_activeRow,true);
+            _activeRow=null;
+            _addRow('Benchmark complete!','#16a34a',_TICK);
             var link=document.getElementById('bench-report-link');
             link.href='/api/report/'+ev.report_id;
             resLink.style.display='block';
-            btn.textContent='&#9654; Run Again';btn.disabled=false;
+            btn.textContent='\u25b6 Run Again';btn.disabled=false;
           }else if(ev.type==='error'){
-            addMsg('Error: '+ev.message,'#dc2626');
-            btn.textContent='&#9654; Retry';btn.disabled=false;
+            _markDone(_activeRow,false);
+            _activeRow=null;
+            _addRow('Error: '+ev.message,'#dc2626',_ERR);
+            btn.textContent='\u25b6 Retry';btn.disabled=false;
           }
         }catch(ex){}
       }
     }
   }catch(err){
-    addMsg('Failed to connect to benchmark service.','#dc2626');
-    btn.textContent='&#9654; Retry';btn.disabled=false;
+    _markDone(_activeRow,false);
+    _addRow('Failed to connect to benchmark service.','#dc2626',_ERR);
+    btn.textContent='\u25b6 Retry';btn.disabled=false;
   }
 }
 </script>
