@@ -54,12 +54,13 @@ Evaluate the page against all 10 heuristics:
 8. Aesthetic and minimalist design
 9. Help users recognize, diagnose, and recover from errors
 10. Help and documentation
-For each issue found, provide:
-- Which heuristic is violated (number + name)
-- Where exactly on the page the issue occurs
-- What the specific problem is
-- A concrete recommendation to fix it
-- Severity: Critical / High / Medium / Low
+For each issue found, use this exact format:
+
+**Issue N: Short title (4-6 words)**
+- **Heuristic:** X. Heuristic name
+- **Problem:** Specific description of what is wrong
+- **Recommendation:** Concrete actionable fix
+- **Severity:** Critical / High / Medium / Low
 
 PART 2 — CTA Effectiveness
 Identify every call-to-action on the page (buttons, links, form submits) and assess:
@@ -121,12 +122,14 @@ PART 1 — Nielsen's 10 Heuristics (evaluated across the full flow)
 8. Aesthetic and minimalist design
 9. Help users recognize, diagnose, and recover from errors
 10. Help and documentation
-For each issue found, provide:
-- Which step(s) it occurs in (e.g. "Step 2 → Step 3")
-- Which heuristic is violated (number + name)
-- What the specific problem is
-- A concrete recommendation to fix it
-- Severity: Critical / High / Medium / Low
+For each issue found, use this exact format:
+
+**Issue N: Short title (4-6 words)**
+- **Step(s):** Which step(s) it occurs in (e.g. "Step 2 → Step 3")
+- **Heuristic:** X. Heuristic name
+- **Problem:** Specific description of what is wrong
+- **Recommendation:** Concrete actionable fix
+- **Severity:** Critical / High / Medium / Low
 Also evaluate:
 - Flow continuity: does each screen logically follow from the previous?
 - Progress visibility: does the user know where they are in the journey?
@@ -946,6 +949,20 @@ def annotate_screenshot(screenshot_bytes: bytes, found: list) -> bytes:
     out = io.BytesIO()
     combined.save(out, format="PNG")
     return out.getvalue()
+def _split_png_to_viewport_slices(img_bytes: bytes, viewport_height: int) -> list[bytes]:
+    """Split a full-page annotated PNG into viewport-height slices."""
+    img = Image.open(io.BytesIO(img_bytes))
+    w, h = img.size
+    slices = []
+    y = 0
+    while y < h:
+        bottom = min(y + viewport_height, h)
+        cropped = img.crop((0, y, w, bottom))
+        buf = io.BytesIO()
+        cropped.save(buf, format="PNG", optimize=True)
+        slices.append(buf.getvalue())
+        y += viewport_height
+    return slices
 def crop_to_issue_regions(screenshot_bytes: bytes, found: list, padding: int = 80) -> list[tuple]:
     img = Image.open(io.BytesIO(screenshot_bytes)).convert("RGB")
     w, h = img.size
@@ -1079,15 +1096,27 @@ def _extract_issue_details(report_text: str) -> dict:
         end = headers[i + 1].start() if i + 1 < len(headers) else len(report_text)
         block = report_text[start:end]
         detail = {}
-        hm = re.search(r'\*\*Heuristics?\*\*[:\s*]+(.+?)(?:\n|$)', block, re.IGNORECASE)
+        # Heuristic: matches "**Heuristic:**", "**Heuristics:**", "**Heuristic violated:**" etc.
+        hm = re.search(
+            r'\*\*Heuristics?(?:[^*]*)?\*\*\s*:?\s*(.+?)(?:\n|$)',
+            block, re.IGNORECASE,
+        )
         if hm:
-            detail['heuristic'] = hm.group(1).strip().rstrip('*').strip()
-        pm = re.search(r'\*\*Problem\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+            detail['heuristic'] = hm.group(1).strip().lstrip(':').strip().rstrip('*').strip()
+        # Problem: stop at next bullet field or end of block
+        _next_field = r'(?=\n\s*[-*]\s*\*\*|\Z)'
+        pm = re.search(
+            r'\*\*Problem\*\*\s*:?\s*(.+?)' + _next_field,
+            block, re.IGNORECASE | re.DOTALL,
+        )
         if pm:
-            detail['problem'] = ' '.join(pm.group(1).split())
-        rm = re.search(r'\*\*Recommendation\*\*[:\s*]+(.+?)(?=\n\s*[-*]\s*\*\*|\Z)', block, re.IGNORECASE | re.DOTALL)
+            detail['problem'] = ' '.join(pm.group(1).split()).strip().lstrip(':').strip()
+        rm = re.search(
+            r'\*\*Recommendation\*\*\s*:?\s*(.+?)' + _next_field,
+            block, re.IGNORECASE | re.DOTALL,
+        )
         if rm:
-            detail['recommendation'] = ' '.join(rm.group(1).split())
+            detail['recommendation'] = ' '.join(rm.group(1).split()).strip().lstrip(':').strip()
         if detail:
             result[issue_num] = detail
     return result
@@ -1213,17 +1242,38 @@ def _modal_html() -> str:
     var chatBtn = hasChat
       ? '<button id="ss-ask-btn" style="width:100%;padding:.65rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-weight:600;cursor:pointer;font-size:.88rem;font-family:system-ui,sans-serif;">&#128172; Ask Claude about this</button>'
       : '';
+    // Build heuristic tag: "#6 – Recognition rathe..."
+    var heuristicTag = '';
+    if(issue.heuristic) {
+      var hNumM = issue.heuristic.match(/^(\d+)/);
+      if(hNumM) {
+        var hNum = hNumM[1];
+        var hName = issue.heuristic.replace(/^\d+[\.\)]\s*/, '');
+        var hShort = hName.length > 20 ? hName.substring(0, 20) + '\u2026' : hName;
+        heuristicTag = '<span style="background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:.15rem .55rem;font-size:.74rem;font-weight:600;font-family:system-ui,sans-serif;white-space:nowrap;">#'+hNum+' \u2013 '+_esc(hShort)+'</span>';
+      } else {
+        var hShort2 = issue.heuristic.length > 22 ? issue.heuristic.substring(0, 22) + '\u2026' : issue.heuristic;
+        heuristicTag = '<span style="background:#0f172a;color:#94a3b8;border:1px solid #334155;border-radius:6px;padding:.15rem .55rem;font-size:.74rem;font-weight:600;font-family:system-ui,sans-serif;">'+_esc(hShort2)+'</span>';
+      }
+    }
+    var descHtml = issue.problem
+      ? '<p style="font-size:.84rem;color:#cbd5e1;line-height:1.6;font-family:system-ui,sans-serif;margin-bottom:1.1rem;">'+_esc(issue.problem)+'</p>'
+      : '';
+    var recHtml = issue.recommendation
+      ? '<div style="border-left:3px solid #6366f1;padding:.6rem .75rem;margin-bottom:1rem;background:#1a2332;border-radius:0 6px 6px 0;">' +
+          '<div style="font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:#6366f1;font-family:system-ui,sans-serif;margin-bottom:.35rem;">Recommendation</div>' +
+          '<p style="font-size:.82rem;color:#cbd5e1;line-height:1.55;font-family:system-ui,sans-serif;margin:0;">'+_esc(issue.recommendation)+'</p>' +
+        '</div>'
+      : '';
     content.innerHTML =
-      '<div style="display:flex;align-items:center;gap:.6rem;margin-bottom:1rem;">' +
-        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.25rem .7rem;font-size:1rem;font-weight:700;font-family:system-ui,sans-serif;">#'+issue.issue_number+'</span>' +
-        '<span style="background:'+color+'33;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.78rem;font-weight:600;font-family:system-ui,sans-serif;">'+_esc(issue.severity)+'</span>' +
+      '<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.85rem;flex-wrap:wrap;">' +
+        '<span style="background:'+color+';color:#fff;border-radius:6px;padding:.2rem .65rem;font-size:.95rem;font-weight:700;font-family:system-ui,sans-serif;">#'+issue.issue_number+'</span>' +
+        '<span style="background:'+color+'26;color:'+color+';border-radius:9999px;padding:.15rem .65rem;font-size:.78rem;font-weight:600;font-family:system-ui,sans-serif;">'+_esc(issue.severity)+'</span>' +
+        heuristicTag +
       '</div>' +
-      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:1rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
-      '<div style="border-top:1px solid #334155;padding-top:.9rem;margin-bottom:1rem;">' +
-        _ssField('Heuristic', issue.heuristic) +
-        _ssField('Problem', issue.problem) +
-        _ssField('Recommendation', issue.recommendation) +
-      '</div>' +
+      '<h3 style="font-size:.95rem;font-weight:700;color:#f8fafc;margin-bottom:.9rem;font-family:system-ui,sans-serif;line-height:1.4;">'+_esc(issue.short_title)+'</h3>' +
+      descHtml +
+      recHtml +
       ignBtn +
       chatBtn;
     if(vp) {
@@ -1450,14 +1500,26 @@ def _single_viewport_section(
         for loc in locations
     ])
     modal_data = _html_mod.escape(modal_issues)
+    # Split full annotated screenshot into viewport-height slices
+    vp_height = DESKTOP_VIEWPORT["height"] if vp == "desktop" else MOBILE_VIEWPORT["height"]
+    slices = _split_png_to_viewport_slices(annotated_png, vp_height)
+    slice_imgs_html = ""
+    for idx, slice_bytes in enumerate(slices):
+        slice_b64 = base64.b64encode(slice_bytes).decode()
+        label = f"Section {idx + 1} of {len(slices)}"
+        slice_imgs_html += f"""
+      <div style="position:relative;margin-bottom:{'0' if idx == len(slices)-1 else '0.75rem'};">
+        <img src="data:image/png;base64,{slice_b64}" alt="{label}"
+             style="display:block;width:100%;border:1px solid #e2e8f0;border-radius:8px;cursor:zoom-in;"
+             onclick="_ssOpen(document.getElementById('ss-full-{vp}').dataset.src,JSON.parse(document.getElementById('ss-full-{vp}').dataset.issues),'{vp}')" />
+        <span style="position:absolute;bottom:8px;right:10px;background:rgba(15,23,42,.65);color:#94a3b8;font-size:.7rem;padding:2px 8px;border-radius:4px;font-family:system-ui,sans-serif;pointer-events:none;">{label}</span>
+      </div>"""
     return f"""
     {_score_init_script(vp, score_val, locations)}
+    <div id="ss-full-{vp}" style="display:none;" data-src="data:image/png;base64,{img_b64}" data-issues="{modal_data}"></div>
     <div class="screenshot-card">
-      <h2>Annotated Page Screenshot <small style="font-size:.75rem;color:#94a3b8;font-weight:400;">&nbsp;&mdash; click to explore issues</small></h2>
-      <img src="data:image/png;base64,{img_b64}" alt="Annotated screenshot"
-           style="cursor:zoom-in;"
-           data-issues="{modal_data}"
-           onclick="_ssOpen(this.src,JSON.parse(this.dataset.issues),'{vp}')" />
+      <h2>Annotated Page Screenshot <small style="font-size:.75rem;color:#94a3b8;font-weight:400;">&nbsp;&mdash; click any section to explore issues</small></h2>
+      {slice_imgs_html}
     </div>
     {_score_card_html(score_val, vp)}
     {legend_html}
