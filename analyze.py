@@ -1369,7 +1369,37 @@ def _modal_html() -> str:
       btn.style.borderColor  = isIgnored ? '#475569' : '#cbd5e1';
     }
   }
-  document.addEventListener('keydown',function(e){if(e.key==='Escape')window._ssClose();});
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'){window._ssClose();_sliceZoomClose();}});
+  // Simple lightbox for individual screenshot slices (no overlays)
+  var _sliceZoomEl = null;
+  window._ssSliceZoom = function(src, label) {
+    if(!_sliceZoomEl) {
+      _sliceZoomEl = document.createElement('div');
+      _sliceZoomEl.style.cssText = 'display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.92);align-items:center;justify-content:center;flex-direction:column;';
+      _sliceZoomEl.onclick = function(e){if(e.target===_sliceZoomEl)_sliceZoomClose();};
+      var inner = document.createElement('div');
+      inner.style.cssText = 'position:relative;max-width:92vw;max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:.6rem;';
+      var closeBtn = document.createElement('button');
+      closeBtn.innerHTML = '&times;';
+      closeBtn.style.cssText = 'position:absolute;top:-2rem;right:0;background:none;border:none;color:#64748b;font-size:1.75rem;cursor:pointer;line-height:1;padding:0;z-index:1;';
+      closeBtn.onclick = _sliceZoomClose;
+      var lbl = document.createElement('div');
+      lbl.id = '_szLabel';
+      lbl.style.cssText = 'font-size:.78rem;color:#64748b;font-family:system-ui,sans-serif;align-self:flex-start;';
+      var img = document.createElement('img');
+      img.id = '_szImg';
+      img.style.cssText = 'display:block;max-width:92vw;max-height:88vh;border-radius:8px;box-shadow:0 8px 60px rgba(0,0,0,.7);object-fit:contain;';
+      inner.appendChild(closeBtn);
+      inner.appendChild(lbl);
+      inner.appendChild(img);
+      _sliceZoomEl.appendChild(inner);
+      document.body.appendChild(_sliceZoomEl);
+    }
+    document.getElementById('_szImg').src = src;
+    document.getElementById('_szLabel').textContent = label;
+    _sliceZoomEl.style.display = 'flex';
+  };
+  function _sliceZoomClose(){if(_sliceZoomEl)_sliceZoomEl.style.display='none';}
 })();
 </script>
 """
@@ -1508,9 +1538,9 @@ def _single_viewport_section(
         slice_b64 = base64.b64encode(slice_bytes).decode()
         label = f"Section {idx + 1}"
         slice_cards += f"""
-      <div style="flex:0 0 auto;background:#0f172a;border-radius:10px;overflow:hidden;cursor:zoom-in;transition:transform .15s;width:320px;"
-           onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'"
-           onclick="_ssOpen(document.getElementById('ss-full-{vp}').dataset.src,JSON.parse(document.getElementById('ss-full-{vp}').dataset.issues),'{vp}')">
+      <div style="flex:0 0 auto;background:#0f172a;border-radius:10px;overflow:hidden;cursor:zoom-in;transition:box-shadow .2s;width:320px;"
+           onmouseover="this.style.boxShadow='0 0 0 2px #6366f1,0 8px 32px rgba(0,0,0,.5)'" onmouseout="this.style.boxShadow='none'"
+           onclick="_ssSliceZoom('data:image/png;base64,{slice_b64}','{label}')">
         <div style="padding:.5rem .75rem;background:#1e293b;display:flex;align-items:center;gap:.5rem;">
           <span style="background:#6366f1;color:#fff;font-size:.72rem;font-weight:700;padding:.15rem .5rem;border-radius:4px;font-family:system-ui,sans-serif;">{label}</span>
           <span style="font-size:.72rem;color:#64748b;font-family:system-ui,sans-serif;">{vp} view</span>
