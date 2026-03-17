@@ -1098,21 +1098,21 @@ def _extract_issue_details(report_text: str) -> dict:
         detail = {}
         # Heuristic: matches "**Heuristic:**", "**Heuristics:**", "**Heuristic violated:**" etc.
         hm = re.search(
-            r'\*\*Heuristics?(?:[^*]*)?\*\*\s*:?\s*(.+?)(?:\n|$)',
+            r'\*\*Heuristics?[^*]*\*\*\s*:?\s*(.+?)(?:\n|$)',
             block, re.IGNORECASE,
         )
         if hm:
             detail['heuristic'] = hm.group(1).strip().lstrip(':').strip().rstrip('*').strip()
-        # Problem: stop at next bullet field or end of block
+        # Problem: colon may be inside bold (**Problem:**) or outside (**Problem**:)
         _next_field = r'(?=\n\s*[-*]\s*\*\*|\Z)'
         pm = re.search(
-            r'\*\*Problem\*\*\s*:?\s*(.+?)' + _next_field,
+            r'\*\*Problem[^*]*\*\*\s*:?\s*(.+?)' + _next_field,
             block, re.IGNORECASE | re.DOTALL,
         )
         if pm:
             detail['problem'] = ' '.join(pm.group(1).split()).strip().lstrip(':').strip()
         rm = re.search(
-            r'\*\*Recommendation\*\*\s*:?\s*(.+?)' + _next_field,
+            r'\*\*Recommendation[^*]*\*\*\s*:?\s*(.+?)' + _next_field,
             block, re.IGNORECASE | re.DOTALL,
         )
         if rm:
@@ -1503,23 +1503,31 @@ def _single_viewport_section(
     # Split full annotated screenshot into viewport-height slices
     vp_height = DESKTOP_VIEWPORT["height"] if vp == "desktop" else MOBILE_VIEWPORT["height"]
     slices = _split_png_to_viewport_slices(annotated_png, vp_height)
-    slice_imgs_html = ""
+    slice_cards = ""
     for idx, slice_bytes in enumerate(slices):
         slice_b64 = base64.b64encode(slice_bytes).decode()
-        label = f"Section {idx + 1} of {len(slices)}"
-        slice_imgs_html += f"""
-      <div style="position:relative;margin-bottom:{'0' if idx == len(slices)-1 else '0.75rem'};">
+        label = f"Section {idx + 1}"
+        slice_cards += f"""
+      <div style="flex:0 0 auto;background:#0f172a;border-radius:10px;overflow:hidden;cursor:zoom-in;transition:transform .15s;width:320px;"
+           onmouseover="this.style.transform='scale(1.02)'" onmouseout="this.style.transform='scale(1)'"
+           onclick="_ssOpen(document.getElementById('ss-full-{vp}').dataset.src,JSON.parse(document.getElementById('ss-full-{vp}').dataset.issues),'{vp}')">
+        <div style="padding:.5rem .75rem;background:#1e293b;display:flex;align-items:center;gap:.5rem;">
+          <span style="background:#6366f1;color:#fff;font-size:.72rem;font-weight:700;padding:.15rem .5rem;border-radius:4px;font-family:system-ui,sans-serif;">{label}</span>
+          <span style="font-size:.72rem;color:#64748b;font-family:system-ui,sans-serif;">{vp} view</span>
+        </div>
         <img src="data:image/png;base64,{slice_b64}" alt="{label}"
-             style="display:block;width:100%;border:1px solid #e2e8f0;border-radius:8px;cursor:zoom-in;"
-             onclick="_ssOpen(document.getElementById('ss-full-{vp}').dataset.src,JSON.parse(document.getElementById('ss-full-{vp}').dataset.issues),'{vp}')" />
-        <span style="position:absolute;bottom:8px;right:10px;background:rgba(15,23,42,.65);color:#94a3b8;font-size:.7rem;padding:2px 8px;border-radius:4px;font-family:system-ui,sans-serif;pointer-events:none;">{label}</span>
+             style="display:block;width:100%;border:none;" />
       </div>"""
+    n_slices = len(slices)
+    scroll_hint = f"{n_slices} section{'s' if n_slices != 1 else ''} &mdash; scroll horizontally &middot; click to explore issues" if n_slices > 1 else "click to explore issues"
     return f"""
     {_score_init_script(vp, score_val, locations)}
     <div id="ss-full-{vp}" style="display:none;" data-src="data:image/png;base64,{img_b64}" data-issues="{modal_data}"></div>
     <div class="screenshot-card">
-      <h2>Annotated Page Screenshot <small style="font-size:.75rem;color:#94a3b8;font-weight:400;">&nbsp;&mdash; click any section to explore issues</small></h2>
-      {slice_imgs_html}
+      <h2>Annotated Page Screenshot <small style="font-size:.75rem;color:#94a3b8;font-weight:400;">&nbsp;&mdash; {scroll_hint}</small></h2>
+      <div style="display:flex;gap:1rem;overflow-x:auto;padding-bottom:.75rem;scrollbar-width:thin;scrollbar-color:#334155 transparent;">
+        {slice_cards}
+      </div>
     </div>
     {_score_card_html(score_val, vp)}
     {legend_html}
