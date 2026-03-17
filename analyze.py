@@ -1121,23 +1121,48 @@ def _extract_issue_details(report_text: str) -> dict:
             result[issue_num] = detail
     return result
 def _escape_report(report_text: str) -> str:
-    escaped = (
+    text = (
         report_text
         .encode("utf-8", errors="replace").decode("utf-8")
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+    # Severity color highlights before bold conversion
     for sev, color in SEVERITY_HEX.items():
-        escaped = escaped.replace(
+        text = text.replace(
             f"**{sev}**",
             f'<strong style="color:{color}">{sev}</strong>',
         )
-        escaped = escaped.replace(
+        text = text.replace(
             f"Severity:** **{sev}**",
             f'Severity: <strong style="color:{color}">{sev}</strong>',
         )
-    return escaped
+    # Convert markdown headings and horizontal rules line-by-line
+    lines = text.split('\n')
+    out = []
+    for line in lines:
+        s = line.rstrip()
+        if re.match(r'^#{4}\s+', s):
+            s = re.sub(r'^#{4}\s+', '', s)
+            out.append(f'<h4 style="font-size:.88rem;font-weight:700;color:#1e293b;margin:.6rem 0 .15rem;">{s}</h4>')
+        elif re.match(r'^#{3}\s+', s):
+            s = re.sub(r'^#{3}\s+', '', s)
+            out.append(f'<h3 style="font-size:.95rem;font-weight:700;color:#1e293b;margin:.75rem 0 .2rem;">{s}</h3>')
+        elif re.match(r'^#{2}\s+', s):
+            s = re.sub(r'^#{2}\s+', '', s)
+            out.append(f'<h2 style="font-size:1.05rem;font-weight:700;color:#0f172a;margin:1.1rem 0 .3rem;padding-top:.6rem;border-top:1px solid #e2e8f0;">{s}</h2>')
+        elif re.match(r'^#{1}\s+', s):
+            s = re.sub(r'^#{1}\s+', '', s)
+            out.append(f'<h1 style="font-size:1.15rem;font-weight:700;color:#0f172a;margin:1rem 0 .35rem;">{s}</h1>')
+        elif re.match(r'^---+\s*$', s):
+            out.append('<hr style="border:none;border-top:1px solid #e2e8f0;margin:.4rem 0;">')
+        else:
+            out.append(line)
+    text = '\n'.join(out)
+    # Convert remaining **bold** (not already converted severity tags)
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    return text
 def _viewport_tab_html(desktop_content: str, mobile_content: str) -> str:
     return f"""
     <div id="vp-desktop">{desktop_content}</div>
@@ -1369,37 +1394,23 @@ def _modal_html() -> str:
       btn.style.borderColor  = isIgnored ? '#475569' : '#cbd5e1';
     }
   }
-  document.addEventListener('keydown',function(e){if(e.key==='Escape'){window._ssClose();_sliceZoomClose();}});
-  // Simple lightbox for individual screenshot slices (no overlays)
-  var _sliceZoomEl = null;
-  window._ssSliceZoom = function(src, label) {
-    if(!_sliceZoomEl) {
-      _sliceZoomEl = document.createElement('div');
-      _sliceZoomEl.style.cssText = 'display:none;position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,.92);align-items:center;justify-content:center;flex-direction:column;';
-      _sliceZoomEl.onclick = function(e){if(e.target===_sliceZoomEl)_sliceZoomClose();};
-      var inner = document.createElement('div');
-      inner.style.cssText = 'position:relative;max-width:92vw;max-height:92vh;display:flex;flex-direction:column;align-items:center;gap:.6rem;';
-      var closeBtn = document.createElement('button');
-      closeBtn.innerHTML = '&times;';
-      closeBtn.style.cssText = 'position:absolute;top:-2rem;right:0;background:none;border:none;color:#64748b;font-size:1.75rem;cursor:pointer;line-height:1;padding:0;z-index:1;';
-      closeBtn.onclick = _sliceZoomClose;
-      var lbl = document.createElement('div');
-      lbl.id = '_szLabel';
-      lbl.style.cssText = 'font-size:.78rem;color:#64748b;font-family:system-ui,sans-serif;align-self:flex-start;';
-      var img = document.createElement('img');
-      img.id = '_szImg';
-      img.style.cssText = 'display:block;max-width:92vw;max-height:88vh;border-radius:8px;box-shadow:0 8px 60px rgba(0,0,0,.7);object-fit:contain;';
-      inner.appendChild(closeBtn);
-      inner.appendChild(lbl);
-      inner.appendChild(img);
-      _sliceZoomEl.appendChild(inner);
-      document.body.appendChild(_sliceZoomEl);
-    }
-    document.getElementById('_szImg').src = src;
-    document.getElementById('_szLabel').textContent = label;
-    _sliceZoomEl.style.display = 'flex';
+  document.addEventListener('keydown',function(e){if(e.key==='Escape')window._ssClose();});
+  // Open a viewport-height slice in the modal with recalculated overlays
+  window._ssOpenSlice = function(sliceSrc, allIssues, vp, yStart, yEnd) {
+    var sliceH = yEnd - yStart;
+    var sliceIssues = (allIssues || []).map(function(issue) {
+      var b = issue.bbox_pct;
+      if(!b) return Object.assign({}, issue, {bbox_pct: null});
+      var issueBot = b.y + b.h;
+      // Skip issues entirely outside this slice
+      if(issueBot <= yStart || b.y >= yEnd) return null;
+      // Recalculate y and h relative to the slice
+      var newY = Math.max(0, (b.y - yStart) / sliceH);
+      var newH = (Math.min(issueBot, yEnd) - Math.max(b.y, yStart)) / sliceH;
+      return Object.assign({}, issue, {bbox_pct: {x: b.x, y: newY, w: b.w, h: Math.max(newH, 0)}});
+    }).filter(Boolean);
+    window._ssOpen(sliceSrc, sliceIssues, vp);
   };
-  function _sliceZoomClose(){if(_sliceZoomEl)_sliceZoomEl.style.display='none';}
 })();
 </script>
 """
@@ -1451,8 +1462,10 @@ def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port:
       border-radius: 6px; color: white; font-weight: 700; font-size: 0.8rem; }}
     .sev-pill {{ display: inline-block; padding: 0.15rem 0.6rem; border-radius: 9999px;
       color: white; font-weight: 600; font-size: 0.75rem; }}
-    .report-body {{ font-size: 0.92rem; white-space: pre-wrap; word-wrap: break-word;
+    .report-body {{ font-size: 0.92rem; word-wrap: break-word;
       color: #334155; line-height: 1.75; }}
+    .report-body p {{ margin-bottom: .6rem; }}
+    .report-body strong {{ font-weight: 700; }}
     ::selection {{ background: #bfdbfe; color: #1e3a8a; }}
     {extra_css}
   </style>
@@ -1533,14 +1546,17 @@ def _single_viewport_section(
     # Split full annotated screenshot into viewport-height slices
     vp_height = DESKTOP_VIEWPORT["height"] if vp == "desktop" else MOBILE_VIEWPORT["height"]
     slices = _split_png_to_viewport_slices(annotated_png, vp_height)
+    full_img_h = Image.open(io.BytesIO(annotated_png)).size[1]
     slice_cards = ""
     for idx, slice_bytes in enumerate(slices):
         slice_b64 = base64.b64encode(slice_bytes).decode()
         label = f"Section {idx + 1}"
+        y_start_frac = round((idx * vp_height) / full_img_h, 6)
+        y_end_frac   = round(min((idx + 1) * vp_height, full_img_h) / full_img_h, 6)
         slice_cards += f"""
       <div style="flex:0 0 auto;background:#0f172a;border-radius:10px;overflow:hidden;cursor:zoom-in;transition:box-shadow .2s;width:320px;"
-           onmouseover="this.style.boxShadow='0 0 0 2px #6366f1,0 8px 32px rgba(0,0,0,.5)'" onmouseout="this.style.boxShadow='none'"
-           onclick="_ssSliceZoom('data:image/png;base64,{slice_b64}','{label}')">
+           onmouseover="this.style.boxShadow='0 8px 32px rgba(0,0,0,.55)'" onmouseout="this.style.boxShadow='none'"
+           onclick="_ssOpenSlice('data:image/png;base64,{slice_b64}',JSON.parse(document.getElementById('ss-full-{vp}').dataset.issues),'{vp}',{y_start_frac},{y_end_frac})">
         <div style="padding:.5rem .75rem;background:#1e293b;display:flex;align-items:center;gap:.5rem;">
           <span style="background:#6366f1;color:#fff;font-size:.72rem;font-weight:700;padding:.15rem .5rem;border-radius:4px;font-family:system-ui,sans-serif;">{label}</span>
           <span style="font-size:.72rem;color:#64748b;font-family:system-ui,sans-serif;">{vp} view</span>
