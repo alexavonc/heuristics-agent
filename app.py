@@ -66,6 +66,7 @@ def api_analyze():
         return jsonify({"error": str(e)}), 500
 
     report_id = str(uuid.uuid4())
+    result["html"] = result.get("html", "").replace("__REPORT_ID__", report_id)
     _reports[report_id] = result
     return jsonify({
         "report_id":     report_id,
@@ -100,6 +101,7 @@ def api_analyze_screenshots():
         return jsonify({"error": str(e)}), 500
 
     report_id = str(uuid.uuid4())
+    result["html"] = result.get("html", "").replace("__REPORT_ID__", report_id)
     _reports[report_id] = result
     return jsonify({
         "report_id":     report_id,
