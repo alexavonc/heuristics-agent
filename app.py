@@ -5,7 +5,6 @@ import sys
 import threading
 import uuid
 import json
-import time
 import httpx
 import anthropic
 
@@ -13,7 +12,7 @@ import anthropic
 print("Installing/verifying Playwright Chromium...", flush=True)
 subprocess.run(["playwright", "install", "chromium"], check=False)
 print("Chromium ready.", flush=True)
-from flask import Flask, request, Response, jsonify, send_from_directory
+from flask import Flask, request, Response, jsonify, send_from_directory, session
 from flask_cors import CORS
 
 from analyze import (
@@ -28,57 +27,40 @@ from benchmark import run_benchmark, capture_with_login, _to_png_b64
 
 app = Flask(__name__)
 CORS(app)
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
 API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "flowthreeKAL")
 
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
 
-# ── One-time-use token system ──────────────────────────────────────
-TOKENS_FILE  = os.path.join(os.path.dirname(__file__), "tokens.json")
-_tokens_lock = threading.Lock()
-
-def _load_tokens() -> dict:
-    try:
-        with open(TOKENS_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-def _save_tokens(tokens: dict):
-    with open(TOKENS_FILE, "w") as f:
-        json.dump(tokens, f, indent=2)
-
-def _tokens_required() -> bool:
-    """Auth is only enforced when tokens.json exists and has entries."""
-    tokens = _load_tokens()
-    return bool(tokens)
-
-def _consume_token(token: str) -> tuple[bool, str]:
-    """
-    Attempt to consume a token. Returns (ok, error_message).
-    Burns the token atomically under a lock.
-    """
-    with _tokens_lock:
-        tokens = _load_tokens()
-        if not tokens:
-            return True, ""               # dev mode — no tokens configured
-        entry = tokens.get(token)
-        if entry is None:
-            return False, "Invalid access token."
-        if entry.get("used"):
-            return False, "This token has already been used."
-        entry["used"]    = True
-        entry["used_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        _save_tokens(tokens)
-        return True, ""
+def _require_auth():
+    """Return a 401 response if the session is not authenticated, else None."""
+    if not session.get("authed"):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
 
 
 # ── Frontend ──────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+# ── Auth ──────────────────────────────────────────────────────────
+@app.route("/api/auth", methods=["POST"])
+def api_auth():
+    data = request.get_json(force=True)
+    if data.get("password") == APP_PASSWORD:
+        session["authed"] = True
+        return jsonify({"ok": True})
+    return jsonify({"error": "Wrong password"}), 401
+
+@app.route("/api/auth/check")
+def api_auth_check():
+    return jsonify({"authed": bool(session.get("authed"))})
 
 
 # ── Health ────────────────────────────────────────────────────────
@@ -90,14 +72,12 @@ def health():
 # ── Analyze: live URL ─────────────────────────────────────────────
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
+    err = _require_auth()
+    if err: return err
+
     data  = request.get_json(force=True)
     url   = data.get("url")
     steps = data.get("steps")
-    token = data.get("token", "").strip()
-
-    ok, err = _consume_token(token)
-    if not ok:
-        return jsonify({"error": err}), 403
 
     if not url:
         return jsonify({"error": "url is required"}), 400
@@ -123,12 +103,10 @@ def api_analyze():
 # ── Analyze: screenshot upload ────────────────────────────────────
 @app.route("/api/analyze/screenshots", methods=["POST"])
 def api_analyze_screenshots():
-    journey = request.form.get("journey", "false").lower() == "true"
-    token   = request.form.get("token", "").strip()
+    err = _require_auth()
+    if err: return err
 
-    ok, err = _consume_token(token)
-    if not ok:
-        return jsonify({"error": err}), 403
+    journey = request.form.get("journey", "false").lower() == "true"
 
     try:
         if journey:
