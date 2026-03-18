@@ -1153,15 +1153,106 @@ def _extract_issue_details(report_text: str) -> dict:
         if detail:
             result[issue_num] = detail
     return result
+def _convert_md_tables(text: str) -> str:
+    """Convert markdown table blocks to HTML tables."""
+    lines = text.split('\n')
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if re.match(r'\s*\|', line):
+            table_lines = []
+            while i < len(lines) and re.match(r'\s*\|', lines[i]):
+                table_lines.append(lines[i])
+                i += 1
+            sep_idx = next(
+                (j for j, tl in enumerate(table_lines)
+                 if re.match(r'\s*\|[\s\-:|]+\|', tl) and '--' in tl),
+                None
+            )
+            if sep_idx is not None and sep_idx > 0:
+                def _parse_row(row):
+                    cells = row.split('|')
+                    if cells and not cells[0].strip():  cells = cells[1:]
+                    if cells and not cells[-1].strip(): cells = cells[:-1]
+                    return [c.strip() for c in cells]
+                html  = '<div style="overflow-x:auto;margin:.75rem 0;">'
+                html += '<table style="width:100%;border-collapse:collapse;font-size:.81rem;">'
+                html += '<thead><tr>'
+                for cell in _parse_row(table_lines[0]):
+                    html += (f'<th style="text-align:left;padding:.4rem .6rem;'
+                             f'background:#f1f5f9;border:1px solid #e2e8f0;'
+                             f'font-weight:700;color:#374151;white-space:nowrap;">{cell}</th>')
+                html += '</tr></thead><tbody>'
+                for ri, row in enumerate(table_lines[sep_idx+1:]):
+                    cells = _parse_row(row)
+                    if not cells: continue
+                    bg = '#fff' if ri % 2 == 0 else '#f8fafc'
+                    html += f'<tr style="background:{bg};">'
+                    for cell in cells:
+                        html += (f'<td style="padding:.38rem .6rem;border:1px solid #e2e8f0;'
+                                 f'vertical-align:top;color:#374151;">{cell}</td>')
+                    html += '</tr>'
+                html += '</tbody></table></div>'
+                out.append(html)
+            else:
+                out.extend(table_lines)
+        else:
+            out.append(line)
+            i += 1
+    return '\n'.join(out)
+
+def _convert_md_lists(text: str) -> str:
+    """Convert markdown bullet/numbered lists to HTML ul/ol."""
+    lines = text.split('\n')
+    out = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        ul_m = re.match(r'^(\s*)[*\-]\s+(.+)$', line)
+        ol_m = re.match(r'^(\s*)\d+[.)]\s+(.+)$', line)
+        if ul_m:
+            indent = ul_m.group(1)
+            items = []
+            while i < len(lines):
+                m = re.match(r'^' + re.escape(indent) + r'[*\-]\s+(.+)$', lines[i])
+                if m: items.append(m.group(1)); i += 1
+                else: break
+            html = '<ul style="padding-left:1.4rem;margin:.3rem 0 .55rem;">'
+            for it in items: html += f'<li style="margin-bottom:.2rem;">{it}</li>'
+            out.append(html + '</ul>')
+        elif ol_m:
+            indent = ol_m.group(1)
+            items = []
+            while i < len(lines):
+                m = re.match(r'^' + re.escape(indent) + r'\d+[.)]\s+(.+)$', lines[i])
+                if m: items.append(m.group(1)); i += 1
+                else: break
+            html = '<ol style="padding-left:1.4rem;margin:.3rem 0 .55rem;">'
+            for it in items: html += f'<li style="margin-bottom:.2rem;">{it}</li>'
+            out.append(html + '</ol>')
+        else:
+            out.append(line)
+            i += 1
+    return '\n'.join(out)
+
 def _escape_report(report_text: str) -> str:
+    # 1. Strip trailing "Overall Score" section — already shown in the score card
+    text = re.sub(
+        r'\n+(?:#{1,3}\s*)?(?:\*{0,2})?\s*[Oo]verall\s+(?:[Jj]ourney\s+)?[Ss]core.*',
+        '',
+        report_text,
+        flags=re.DOTALL,
+    )
+    # 2. HTML-escape
     text = (
-        report_text
+        text
         .encode("utf-8", errors="replace").decode("utf-8")
         .replace("&", "&amp;")
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
-    # Severity color highlights before bold conversion
+    # 3. Severity color highlights before bold conversion
     for sev, color in SEVERITY_HEX.items():
         text = text.replace(
             f"**{sev}**",
@@ -1171,12 +1262,14 @@ def _escape_report(report_text: str) -> str:
             f"Severity:** **{sev}**",
             f'Severity: <strong style="color:{color}">{sev}</strong>',
         )
-    # Convert markdown headings and horizontal rules line-by-line
+    # 4. Line-by-line: headings; drop --- rules; drop H1 report title
     lines = text.split('\n')
     out = []
     for line in lines:
         s = line.rstrip()
-        if re.match(r'^#{4}\s+', s):
+        if re.match(r'^#{1,2}\s+Heuristic\s+Evaluation\s+Report', s, re.IGNORECASE):
+            continue  # removed per request — shown in page header
+        elif re.match(r'^#{4}\s+', s):
             s = re.sub(r'^#{4}\s+', '', s)
             out.append(f'<h4 style="font-size:.88rem;font-weight:700;color:#1e293b;margin:.6rem 0 .15rem;">{s}</h4>')
         elif re.match(r'^#{3}\s+', s):
@@ -1184,17 +1277,24 @@ def _escape_report(report_text: str) -> str:
             out.append(f'<h3 style="font-size:.95rem;font-weight:700;color:#1e293b;margin:.75rem 0 .2rem;">{s}</h3>')
         elif re.match(r'^#{2}\s+', s):
             s = re.sub(r'^#{2}\s+', '', s)
-            out.append(f'<h2 style="font-size:1.05rem;font-weight:700;color:#0f172a;margin:1.1rem 0 .3rem;padding-top:.6rem;border-top:1px solid #e2e8f0;">{s}</h2>')
+            out.append(f'<h2 style="font-size:1.05rem;font-weight:700;color:#0f172a;margin:1.1rem 0 .3rem;padding-top:.6rem;">{s}</h2>')
         elif re.match(r'^#{1}\s+', s):
             s = re.sub(r'^#{1}\s+', '', s)
             out.append(f'<h1 style="font-size:1.15rem;font-weight:700;color:#0f172a;margin:1rem 0 .35rem;">{s}</h1>')
         elif re.match(r'^---+\s*$', s):
-            out.append('<hr style="border:none;border-top:1px solid #e2e8f0;margin:.4rem 0;">')
+            pass  # drop horizontal rules (border-top on H2 handles visual separation)
         else:
             out.append(line)
     text = '\n'.join(out)
-    # Convert remaining **bold** (not already converted severity tags)
+    # 5. Convert remaining **bold**
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    # 6. Line break before each issue field bullet "- **Label:**"
+    #    (browser collapses \n to space; replacing "\n- <strong>" gives visible breaks)
+    text = re.sub(r'\n- (<strong>)', r'<br>\1', text)
+    # 7. Markdown tables → HTML
+    text = _convert_md_tables(text)
+    # 8. Markdown lists → HTML (Strengths bullets, etc.)
+    text = _convert_md_lists(text)
     return text
 def _viewport_tab_html(desktop_content: str, mobile_content: str) -> str:
     return f"""
