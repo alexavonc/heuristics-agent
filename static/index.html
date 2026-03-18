@@ -107,18 +107,13 @@
     /* Loading */
     .loading-card { display: none; }
     .loading-card.show { display: block; }
-    .loading-inner { display: flex; flex-direction: column; align-items: center; padding: 2.5rem 1.5rem; }
-    .spinner { width: 36px; height: 36px; border: 3px solid #e2e8f0; border-top-color: #0f172a; border-radius: 50%; animation: spin .7s linear infinite; margin-bottom: 1rem; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    .loading-title { font-size: .9375rem; font-weight: 600; color: #0f172a; margin-bottom: .25rem; }
-    .loading-sub { font-size: .8125rem; color: #64748b; text-align: center; }
-    .loading-steps { margin-top: 1.25rem; display: flex; flex-direction: column; gap: .4rem; width: 100%; max-width: 320px; }
-    .loading-step { display: flex; align-items: center; gap: .6rem; font-size: .8rem; color: #94a3b8; }
-    .loading-step.done { color: #16a34a; }
-    .loading-step.active { color: #0f172a; font-weight: 500; }
-    .ls-dot { width: 6px; height: 6px; border-radius: 50%; background: #e2e8f0; flex-shrink: 0; }
-    .loading-step.done .ls-dot { background: #22c55e; }
-    .loading-step.active .ls-dot { background: #0f172a; }
+    .loading-inner { display: flex; flex-direction: column; align-items: center; padding: 2rem 1.5rem 2.25rem; }
+    .loading-title { font-size: .9375rem; font-weight: 600; color: #0f172a; margin-bottom: .2rem; }
+    .loading-sub { font-size: .8125rem; color: #94a3b8; text-align: center; }
+    .progress-track { width: 100%; height: 5px; background: #e2e8f0; border-radius: 9999px; overflow: hidden; margin: 1.5rem 0 1rem; }
+    .progress-fill { height: 100%; background: #0f172a; border-radius: 9999px; width: 0%; transition: width .7s cubic-bezier(.4,0,.2,1); }
+    .progress-step-label { font-size: .875rem; font-weight: 500; color: #0f172a; text-align: center; min-height: 1.4em; }
+    .progress-step-count { font-size: .75rem; color: #94a3b8; margin-top: .3rem; text-align: center; }
 
 
     /* Error */
@@ -269,10 +264,13 @@
   <!-- Loading -->
   <div class="card loading-card" id="loading-card">
     <div class="loading-inner">
-      <div class="spinner"></div>
       <div class="loading-title" id="loading-title">Analysing your page…</div>
-      <div class="loading-sub">This takes 30–90 seconds depending on the complexity</div>
-      <div class="loading-steps" id="loading-steps"></div>
+      <div class="loading-sub">This takes 30–90 seconds depending on complexity</div>
+      <div class="progress-track" style="width:100%">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="progress-step-label" id="progress-step-label"></div>
+      <div class="progress-step-count" id="progress-step-count"></div>
     </div>
   </div>
 
@@ -457,22 +455,35 @@ var LOAD_STEPS_SS = [
   'Building report',
 ];
 
+var _progressInterval = null;
+
+function _setProgress(pct, label, count) {
+  document.getElementById('progress-fill').style.width = pct + '%';
+  if (label !== undefined) document.getElementById('progress-step-label').textContent = label;
+  if (count !== undefined) document.getElementById('progress-step-count').textContent = count;
+}
+
 function startLoadingSteps(steps) {
-  var container = document.getElementById('loading-steps');
-  container.innerHTML = steps.map(function(s, i) {
-    return '<div class="loading-step'+(i===0?' active':'')+'" id="lstep-'+i+'">'
-      +'<div class="ls-dot"></div>'+s+'</div>';
-  }).join('');
+  if (_progressInterval) clearInterval(_progressInterval);
+  var n = steps.length;
   var i = 0;
-  var iv = setInterval(function() {
-    var el = document.getElementById('lstep-'+i);
-    if (el) { el.classList.remove('active'); el.classList.add('done'); }
+
+  // Show first step immediately at a small initial fill
+  _setProgress(Math.round((1 / n) * 80),
+               steps[0],
+               'Step 1 of ' + n);
+
+  _progressInterval = setInterval(function() {
     i++;
-    if (i >= steps.length) { clearInterval(iv); return; }
-    var next = document.getElementById('lstep-'+i);
-    if (next) next.classList.add('active');
+    if (i >= n) { clearInterval(_progressInterval); _progressInterval = null; return; }
+    var pct = Math.round(((i + 1) / n) * 80);
+    _setProgress(pct, steps[i], 'Step ' + (i + 1) + ' of ' + n);
   }, 12000);
-  return iv;
+}
+
+function completeProgress() {
+  if (_progressInterval) { clearInterval(_progressInterval); _progressInterval = null; }
+  _setProgress(100, 'Done!', '');
 }
 
 // ── Submit ─────────────────────────────────────────────
@@ -569,9 +580,12 @@ function hideLoading() {
 function showReport(reportId, desktopScore, mobileScore) {
   _currentReportId = reportId;
   _currentReportUrl = '/api/report/' + reportId;
-  document.getElementById('loading-card').classList.remove('show');
-  window.open(_currentReportUrl, '_blank');
-  resetForm();
+  completeProgress();
+  setTimeout(function() {
+    document.getElementById('loading-card').classList.remove('show');
+    window.open(_currentReportUrl, '_blank');
+    resetForm();
+  }, 400);
 }
 
 function resetForm() {
