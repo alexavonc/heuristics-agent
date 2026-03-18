@@ -907,20 +907,24 @@ def locate_elements(url: str, locations: list, viewport: dict = None) -> list:
             if not text:
                 continue
             bbox = None
+            # JS text-walker is the primary strategy: it walks text nodes so it
+            # returns the leaf element's bbox rather than a large ancestor container.
             try:
-                locator = page.get_by_text(text, exact=False).first
-                b = locator.bounding_box(timeout=2000)
-                if b and b["width"] > 0 and b["height"] > 0:
+                b = page.evaluate(_JS_FIND_TEXT, text)
+                if b and b.get("width", 0) > 0 and b.get("height", 0) > 0:
                     bbox = b
             except Exception:
                 pass
+            # Fallback: Playwright's get_by_text (good for interactive elements)
             if not bbox:
                 try:
-                    b = page.evaluate(_JS_FIND_TEXT, text)
-                    if b and b.get("width", 0) > 0 and b.get("height", 0) > 0:
+                    locator = page.get_by_text(text, exact=False).first
+                    b = locator.bounding_box(timeout=2000)
+                    if b and b["width"] > 0 and b["height"] > 0:
                         bbox = b
                 except Exception:
                     pass
+            # Last resort: try the first 4 words of the text
             if not bbox and len(text.split()) > 3:
                 short = " ".join(text.split()[:4])
                 try:
@@ -1546,9 +1550,7 @@ def _modal_html() -> str:
       var issueBot = b.y + b.h;
       // Skip issues entirely outside this slice
       if(issueBot <= yStart || b.y >= yEnd) return null;
-      // Only show the issue in the slice where it starts, not in later slices
-      if(b.y < yStart) return null;
-      // Recalculate y and h relative to the slice
+      // Clamp to slice bounds and recalculate y/h relative to slice height
       var newY = Math.max(0, (b.y - yStart) / sliceH);
       var newH = (Math.min(issueBot, yEnd) - Math.max(b.y, yStart)) / sliceH;
       return Object.assign({}, issue, {bbox_pct: {x: b.x, y: newY, w: b.w, h: Math.max(newH, 0)}});
@@ -1946,9 +1948,9 @@ def _analyze_viewport(url: str, viewport: dict, label: str) -> tuple[str, bytes,
                 },
             })
         else:
-            # Could not locate on page — keep Claude's estimate as fallback
-            # but clear bbox_pct if it's suspiciously zeroed
-            updated_locs.append(loc)
+            # Element could not be located on the page — drop the bbox so no
+            # overlay is rendered rather than showing a wrong position.
+            updated_locs.append({**loc, "bbox_pct": None})
     return report_text, annotated_png, updated_locs
 def run(url: str):
     port = _find_free_port() if _FLASK_OK else None

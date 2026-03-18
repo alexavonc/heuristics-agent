@@ -485,7 +485,15 @@ function startLoadingSteps(steps) {
   // Advance softCap (and label) each time a step completes
   _progressInterval = setInterval(function() {
     i++;
-    if (i >= n) { clearInterval(_progressInterval); _progressInterval = null; return; }
+    if (i >= n) {
+      clearInterval(_progressInterval);
+      // All steps fired but API may still be running — drip slowly toward 90%
+      _progressInterval = setInterval(function() {
+        if (_progressSoftCap < 90) _progressSoftCap = Math.min(90, _progressSoftCap + 0.4);
+        else { clearInterval(_progressInterval); _progressInterval = null; }
+      }, 1500);
+      return;
+    }
     // Allow through the completed step's full band + 80% into the next one
     _progressSoftCap = Math.min(80, (i / n) * 80 + bandSize * 0.8);
     document.getElementById('progress-step-label').textContent = steps[i];
