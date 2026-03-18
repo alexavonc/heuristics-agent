@@ -111,7 +111,7 @@
     .loading-title { font-size: .9375rem; font-weight: 600; color: #0f172a; margin-bottom: .2rem; }
     .loading-sub { font-size: .8125rem; color: #94a3b8; text-align: center; }
     .progress-track { width: 100%; height: 5px; background: #e2e8f0; border-radius: 9999px; overflow: hidden; margin: 1.5rem 0 1rem; }
-    .progress-fill { height: 100%; background: #0f172a; border-radius: 9999px; width: 0%; transition: width .7s cubic-bezier(.4,0,.2,1); }
+    .progress-fill { height: 100%; background: #0f172a; border-radius: 9999px; width: 0%; }
     .progress-step-label { font-size: .875rem; font-weight: 500; color: #0f172a; text-align: center; min-height: 1.4em; }
     .progress-step-count { font-size: .75rem; color: #94a3b8; margin-top: .3rem; text-align: center; }
 
@@ -456,34 +456,56 @@ var LOAD_STEPS_SS = [
 ];
 
 var _progressInterval = null;
+var _progressTicker = null;
+var _progressDisplay = 0;  // current rendered %
+var _progressSoftCap = 0;  // trickle limit — raised when each step completes
 
-function _setProgress(pct, label, count) {
-  document.getElementById('progress-fill').style.width = pct + '%';
-  if (label !== undefined) document.getElementById('progress-step-label').textContent = label;
-  if (count !== undefined) document.getElementById('progress-step-count').textContent = count;
+function _tickProgress() {
+  // Ease toward the soft cap; never exceeds it until explicitly raised
+  _progressDisplay += (_progressSoftCap - _progressDisplay) * 0.025;
+  document.getElementById('progress-fill').style.width = _progressDisplay.toFixed(2) + '%';
 }
 
 function startLoadingSteps(steps) {
   if (_progressInterval) clearInterval(_progressInterval);
+  if (_progressTicker)   clearInterval(_progressTicker);
+  _progressDisplay = 0;
   var n = steps.length;
+  var bandSize = 80 / n;   // each step owns an equal slice of the 0-80% range
   var i = 0;
 
-  // Show first step immediately at a small initial fill
-  _setProgress(Math.round((1 / n) * 80),
-               steps[0],
-               'Step 1 of ' + n);
+  // Allow trickle up to 80% into the first step's band
+  _progressSoftCap = bandSize * 0.8;
+  document.getElementById('progress-step-label').textContent = steps[0];
+  document.getElementById('progress-step-count').textContent = 'Step 1 of ' + n;
 
+  // Smooth trickle at 100ms — eases toward softCap so it always looks alive
+  _progressTicker = setInterval(_tickProgress, 100);
+
+  // Advance softCap (and label) each time a step completes
   _progressInterval = setInterval(function() {
     i++;
     if (i >= n) { clearInterval(_progressInterval); _progressInterval = null; return; }
-    var pct = Math.round(((i + 1) / n) * 80);
-    _setProgress(pct, steps[i], 'Step ' + (i + 1) + ' of ' + n);
+    // Allow through the completed step's full band + 80% into the next one
+    _progressSoftCap = Math.min(80, (i / n) * 80 + bandSize * 0.8);
+    document.getElementById('progress-step-label').textContent = steps[i];
+    document.getElementById('progress-step-count').textContent = 'Step ' + (i + 1) + ' of ' + n;
   }, 12000);
 }
 
 function completeProgress() {
   if (_progressInterval) { clearInterval(_progressInterval); _progressInterval = null; }
-  _setProgress(100, 'Done!', '');
+  _progressSoftCap = 100;
+  // Let the ticker run until it reaches 100%, then stop
+  var check = setInterval(function() {
+    if (_progressDisplay >= 99.5) {
+      document.getElementById('progress-fill').style.width = '100%';
+      clearInterval(check);
+      if (_progressTicker) { clearInterval(_progressTicker); _progressTicker = null; }
+    }
+  }, 100);
+  document.getElementById('progress-step-label').textContent = 'Done!';
+  document.getElementById('progress-step-count').textContent = '';
 }
 
 // ── Submit ─────────────────────────────────────────────
