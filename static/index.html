@@ -129,9 +129,36 @@
     .sub-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: .375rem; margin-bottom: 1.25rem; }
     .sub-btn { padding: .5rem; border: 1.5px solid #e2e8f0; border-radius: 7px; background: #fff; font-size: .8rem; font-weight: 500; color: #64748b; cursor: pointer; text-align: center; transition: all .15s; font-family: inherit; }
     .sub-btn.active { border-color: #0f172a; background: #f8fafc; color: #0f172a; }
+
+    /* Password gate */
+    .gate { position: fixed; inset: 0; background: #f8fafc; display: flex; align-items: center; justify-content: center; z-index: 100; }
+    .gate.hidden { display: none; }
+    .gate-box { background: #fff; border: 1px solid #e2e8f0; border-radius: 16px; padding: 2.5rem 2rem; width: 100%; max-width: 360px; box-shadow: 0 4px 24px rgba(15,23,42,.07); }
+    .gate-title { font-size: 1.25rem; font-weight: 700; color: #0f172a; margin-bottom: .25rem; }
+    .gate-sub { font-size: .875rem; color: #64748b; margin-bottom: 1.5rem; }
+    .gate-error { font-size: .8125rem; color: #dc2626; margin-top: .5rem; min-height: 1.2em; }
+    input[type="password"] {
+      width: 100%; padding: .5rem .75rem; border: 1px solid #e2e8f0; border-radius: 8px;
+      font-size: .875rem; font-family: inherit; color: #0f172a; background: #fff;
+      transition: border-color .15s; outline: none; margin-bottom: .75rem;
+    }
+    input[type="password"]:focus { border-color: #0f172a; box-shadow: 0 0 0 3px rgba(15,23,42,.06); }
+    input[type="password"].err { border-color: #dc2626; }
   </style>
 </head>
 <body>
+<!-- Password gate -->
+<div class="gate" id="gate">
+  <div class="gate-box">
+    <div class="gate-title">Heuristics Agent</div>
+    <div class="gate-sub">Enter the password to continue.</div>
+    <input type="password" id="gate-pw" placeholder="Password" autocomplete="current-password"
+           onkeydown="if(event.key==='Enter')submitPassword()" />
+    <button class="btn-primary" onclick="submitPassword()">Continue</button>
+    <div class="gate-error" id="gate-error"></div>
+  </div>
+</div>
+
 <div class="page">
 
   <!-- Header -->
@@ -253,6 +280,40 @@
 </div>
 
 <script>
+// ── Password gate ──────────────────────────────────────
+async function checkAuth() {
+  var res = await fetch('/api/auth/check');
+  var data = await res.json();
+  if (data.authed) {
+    document.getElementById('gate').classList.add('hidden');
+  } else {
+    document.getElementById('gate-pw').focus();
+  }
+}
+
+async function submitPassword() {
+  var pw = document.getElementById('gate-pw').value;
+  var errEl = document.getElementById('gate-error');
+  var inp = document.getElementById('gate-pw');
+  errEl.textContent = '';
+  inp.classList.remove('err');
+  var res = await fetch('/api/auth', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({password: pw}),
+  });
+  if (res.ok) {
+    document.getElementById('gate').classList.add('hidden');
+    inp.value = '';
+  } else {
+    errEl.textContent = 'Wrong password.';
+    inp.classList.add('err');
+    inp.select();
+  }
+}
+
+checkAuth();
+
 // ── State ─────────────────────────────────────────────
 var _mode = 'url';
 var _ssMode = 'single';
@@ -417,7 +478,6 @@ function startLoadingSteps(steps) {
 // ── Submit ─────────────────────────────────────────────
 async function runAnalysis() {
   hideError();
-  var btn = document.getElementById('submit-btn');
 
   if (_mode === 'url') {
     var url = document.getElementById('url-input').value.trim();
@@ -430,6 +490,7 @@ async function runAnalysis() {
         body: JSON.stringify({url: url}),
       });
       var data = await res.json();
+      if (res.status === 401) { hideLoading(); showGate(); return; }
       if (data.error) throw new Error(data.error);
       showReport(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
@@ -457,6 +518,7 @@ async function runAnalysis() {
         body: JSON.stringify({url: url, steps: steps}),
       });
       var data = await res.json();
+      if (res.status === 401) { hideLoading(); showGate(); return; }
       if (data.error) throw new Error(data.error);
       showReport(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
@@ -479,10 +541,16 @@ async function runAnalysis() {
     try {
       var res = await fetch('/api/analyze/screenshots', {method:'POST', body:fd});
       var data = await res.json();
+      if (res.status === 401) { hideLoading(); showGate(); return; }
       if (data.error) throw new Error(data.error);
       showReport(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
   }
+}
+
+function showGate() {
+  document.getElementById('gate').classList.remove('hidden');
+  document.getElementById('gate-pw').focus();
 }
 
 // ── UI helpers ─────────────────────────────────────────

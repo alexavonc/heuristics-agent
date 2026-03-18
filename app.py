@@ -12,7 +12,7 @@ import anthropic
 print("Installing/verifying Playwright Chromium...", flush=True)
 subprocess.run(["playwright", "install", "chromium"], check=False)
 print("Chromium ready.", flush=True)
-from flask import Flask, request, Response, jsonify, send_from_directory
+from flask import Flask, request, Response, jsonify, send_from_directory, session
 from flask_cors import CORS
 
 from analyze import (
@@ -27,18 +27,40 @@ from benchmark import run_benchmark, capture_with_login, _to_png_b64
 
 app = Flask(__name__)
 CORS(app)
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24).hex())
 
 API_KEY      = os.environ.get("ANTHROPIC_API_KEY", "")
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "flowthreeKAL")
 
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
+
+def _require_auth():
+    """Return a 401 response if the session is not authenticated, else None."""
+    if not session.get("authed"):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
 
 
 # ── Frontend ──────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return send_from_directory("static", "index.html")
+
+
+# ── Auth ──────────────────────────────────────────────────────────
+@app.route("/api/auth", methods=["POST"])
+def api_auth():
+    data = request.get_json(force=True)
+    if data.get("password") == APP_PASSWORD:
+        session["authed"] = True
+        return jsonify({"ok": True})
+    return jsonify({"error": "Wrong password"}), 401
+
+@app.route("/api/auth/check")
+def api_auth_check():
+    return jsonify({"authed": bool(session.get("authed"))})
 
 
 # ── Health ────────────────────────────────────────────────────────
@@ -50,6 +72,9 @@ def health():
 # ── Analyze: live URL ─────────────────────────────────────────────
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
+    err = _require_auth()
+    if err: return err
+
     data  = request.get_json(force=True)
     url   = data.get("url")
     steps = data.get("steps")
@@ -78,6 +103,9 @@ def api_analyze():
 # ── Analyze: screenshot upload ────────────────────────────────────
 @app.route("/api/analyze/screenshots", methods=["POST"])
 def api_analyze_screenshots():
+    err = _require_auth()
+    if err: return err
+
     journey = request.form.get("journey", "false").lower() == "true"
 
     try:
