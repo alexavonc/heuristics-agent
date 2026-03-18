@@ -572,7 +572,7 @@ async function startBench(){
     for(;;){
       var r=await reader.read();if(r.done)break;
       buf+=dec.decode(r.value,{stream:true});
-      var lines=buf.split('\n');buf=lines.pop();
+      var lines=buf.split('\\n');buf=lines.pop();
       for(var i=0;i<lines.length;i++){
         var ln=lines[i];if(!ln.startsWith('data: '))continue;
         var raw=ln.slice(6).trim();
@@ -1072,9 +1072,9 @@ def _rubric_rows_html(score: float, vp: str) -> str:
         active = mn <= score <= mx
         bg     = "rgba(99,102,241,.12)" if active else "transparent"
         border = "3px solid #6366f1"    if active else "3px solid transparent"
-        tc     = "#f8fafc"              if active else "#94a3b8"
+        tc     = col                    if active else "#94a3b8"
         rows += (
-            f'<div class="rr" data-min="{mn}" data-max="{mx}" '
+            f'<div class="rr" data-min="{mn}" data-max="{mx}" data-col="{col}" '
             f'style="display:flex;align-items:baseline;gap:.5rem;padding:.3rem .5rem;'
             f'border-radius:5px;border-left:{border};background:{bg};margin-bottom:.25rem;">'
             f'<span style="font-size:.78rem;font-weight:700;color:{col};min-width:2.25rem;">{mn}–{mx}</span>'
@@ -1411,7 +1411,7 @@ def _modal_html() -> str:
       var active = score >= mn && score <= mx;
       row.style.background    = active ? 'rgba(99,102,241,.12)' : 'transparent';
       row.style.borderLeft    = active ? '3px solid #6366f1'    : '3px solid transparent';
-      row.querySelector('span:nth-child(2)').style.color = active ? '#f8fafc' : '#94a3b8';
+      row.querySelector('span:nth-child(2)').style.color = active ? (row.dataset.col || '#1e293b') : '#94a3b8';
     });
   }
   function _updateLegendRow(vp, issueNum, isIgnored) {
@@ -1437,6 +1437,8 @@ def _modal_html() -> str:
       var issueBot = b.y + b.h;
       // Skip issues entirely outside this slice
       if(issueBot <= yStart || b.y >= yEnd) return null;
+      // Only show the issue in the slice where it starts, not in later slices
+      if(b.y < yStart) return null;
       // Recalculate y and h relative to the slice
       var newY = Math.max(0, (b.y - yStart) / sliceH);
       var newH = (Math.min(issueBot, yEnd) - Math.max(b.y, yStart)) / sliceH;
@@ -1450,7 +1452,7 @@ def _modal_html() -> str:
 def _html_shell(title: str, subtitle: str, body: str, extra_css: str = "", port: int = None, api_url: str = None) -> str:
     _has_chat = port or api_url
     chat_btn = """<button id="open-chat-btn" style="margin-left:auto;display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#6366f1;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#4f46e5'" onmouseout="this.style.background='#6366f1'">&#128172; Ask Claude</button>""" if _has_chat else ""
-    bench_btn = """<button id="open-bench-btn" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">&#128202; Benchmark</button>""" if api_url else ""
+    bench_btn = """<button id="open-bench-btn" onclick="openBench()" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:#0f172a;color:#fff;border:none;border-radius:8px;font-size:.85rem;font-weight:600;cursor:pointer;white-space:nowrap;transition:background .15s;" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='#0f172a'">&#128202; Benchmark</button>""" if api_url else ""
     new_analysis_btn = """<a href="/" style="display:flex;align-items:center;gap:.4rem;padding:.45rem 1rem;background:transparent;color:#e2e8f0;border:1.5px solid #475569;border-radius:8px;font-size:.85rem;font-weight:600;text-decoration:none;white-space:nowrap;transition:all .15s;" onmouseover="this.style.borderColor='#94a3b8';this.style.color='#f8fafc'" onmouseout="this.style.borderColor='#475569';this.style.color='#e2e8f0'">&#10227; New analysis</a>""" if api_url else ""
     if port:
         chat_panel = _chat_panel_html(port)
