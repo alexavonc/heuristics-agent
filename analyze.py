@@ -1281,6 +1281,15 @@ def _escape_report(report_text: str) -> str:
         elif re.match(r'^#{1}\s+', s):
             s = re.sub(r'^#{1}\s+', '', s)
             out.append(f'<h1 style="font-size:1.15rem;font-weight:700;color:#0f172a;margin:1rem 0 .35rem;">{s}</h1>')
+        elif re.match(r'^\*\*Issue\s+\d+:', s):
+            # Issue title → visually separated card-like block
+            inner = re.sub(r'^\*\*(.*?)\*\*\s*$', r'\1', s)
+            if inner == s: inner = s[2:]  # no closing ** on line; strip leading only
+            out.append(
+                f'<div style="margin-top:1.4rem;padding-top:1rem;border-top:2px solid #e2e8f0;">'
+                f'<strong style="font-size:.9rem;color:#1e293b;">{inner}</strong>'
+                f'</div>'
+            )
         elif re.match(r'^---+\s*$', s):
             pass  # drop horizontal rules (border-top on H2 handles visual separation)
         else:
