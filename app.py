@@ -5,6 +5,7 @@ import sys
 import threading
 import uuid
 import json
+import time
 import httpx
 import anthropic
 
@@ -34,6 +35,45 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:5000")
 # In-memory report store  {report_id: {html, report_text, ...}}
 _reports: dict = {}
 
+# ── One-time-use token system ──────────────────────────────────────
+TOKENS_FILE  = os.path.join(os.path.dirname(__file__), "tokens.json")
+_tokens_lock = threading.Lock()
+
+def _load_tokens() -> dict:
+    try:
+        with open(TOKENS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_tokens(tokens: dict):
+    with open(TOKENS_FILE, "w") as f:
+        json.dump(tokens, f, indent=2)
+
+def _tokens_required() -> bool:
+    """Auth is only enforced when tokens.json exists and has entries."""
+    tokens = _load_tokens()
+    return bool(tokens)
+
+def _consume_token(token: str) -> tuple[bool, str]:
+    """
+    Attempt to consume a token. Returns (ok, error_message).
+    Burns the token atomically under a lock.
+    """
+    with _tokens_lock:
+        tokens = _load_tokens()
+        if not tokens:
+            return True, ""               # dev mode — no tokens configured
+        entry = tokens.get(token)
+        if entry is None:
+            return False, "Invalid access token."
+        if entry.get("used"):
+            return False, "This token has already been used."
+        entry["used"]    = True
+        entry["used_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        _save_tokens(tokens)
+        return True, ""
+
 
 # ── Frontend ──────────────────────────────────────────────────────
 @app.route("/")
@@ -53,6 +93,11 @@ def api_analyze():
     data  = request.get_json(force=True)
     url   = data.get("url")
     steps = data.get("steps")
+    token = data.get("token", "").strip()
+
+    ok, err = _consume_token(token)
+    if not ok:
+        return jsonify({"error": err}), 403
 
     if not url:
         return jsonify({"error": "url is required"}), 400
@@ -79,6 +124,11 @@ def api_analyze():
 @app.route("/api/analyze/screenshots", methods=["POST"])
 def api_analyze_screenshots():
     journey = request.form.get("journey", "false").lower() == "true"
+    token   = request.form.get("token", "").strip()
+
+    ok, err = _consume_token(token)
+    if not ok:
+        return jsonify({"error": err}), 403
 
     try:
         if journey:

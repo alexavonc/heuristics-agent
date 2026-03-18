@@ -233,6 +233,12 @@
     </div>
 
     <div class="sep"></div>
+    <div class="form-row" id="token-row">
+      <label>Access Token</label>
+      <input type="text" id="token-input" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+             style="font-family:monospace;letter-spacing:.03em;" autocomplete="off" spellcheck="false" />
+      <p class="hint">Each token is single-use. Contact the admin for a token.</p>
+    </div>
     <button class="btn-primary" id="submit-btn" onclick="runAnalysis()">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
       Run Analysis
@@ -417,7 +423,7 @@ function startLoadingSteps(steps) {
 // ── Submit ─────────────────────────────────────────────
 async function runAnalysis() {
   hideError();
-  var btn = document.getElementById('submit-btn');
+  var token = document.getElementById('token-input').value.trim();
 
   if (_mode === 'url') {
     var url = document.getElementById('url-input').value.trim();
@@ -427,11 +433,12 @@ async function runAnalysis() {
       var res = await fetch('/api/analyze', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({url: url}),
+        body: JSON.stringify({url: url, token: token}),
       });
       var data = await res.json();
+      if (res.status === 403) { hideLoading(); showTokenError(data.error); return; }
       if (data.error) throw new Error(data.error);
-      showReport(data.report_id, data.desktop_score, data.mobile_score);
+      onAnalysisDone(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
 
   } else if (_mode === 'journey') {
@@ -454,15 +461,17 @@ async function runAnalysis() {
       var res = await fetch('/api/analyze', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({url: url, steps: steps}),
+        body: JSON.stringify({url: url, steps: steps, token: token}),
       });
       var data = await res.json();
+      if (res.status === 403) { hideLoading(); showTokenError(data.error); return; }
       if (data.error) throw new Error(data.error);
-      showReport(data.report_id, data.desktop_score, data.mobile_score);
+      onAnalysisDone(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
 
   } else if (_mode === 'screenshots') {
     var fd = new FormData();
+    fd.append('token', token);
     if (_ssMode === 'single') {
       var df = document.getElementById('desktop-file').files[0];
       if (!df) { showError('Please upload a desktop screenshot.'); return; }
@@ -479,10 +488,28 @@ async function runAnalysis() {
     try {
       var res = await fetch('/api/analyze/screenshots', {method:'POST', body:fd});
       var data = await res.json();
+      if (res.status === 403) { hideLoading(); showTokenError(data.error); return; }
       if (data.error) throw new Error(data.error);
-      showReport(data.report_id, data.desktop_score, data.mobile_score);
+      onAnalysisDone(data.report_id, data.desktop_score, data.mobile_score);
     } catch(e) { showError('Analysis failed: '+e.message); hideLoading(); }
   }
+}
+
+function showTokenError(msg) {
+  var inp = document.getElementById('token-input');
+  inp.value = '';
+  inp.style.borderColor = '#dc2626';
+  inp.placeholder = 'Token invalid or already used — get a new one';
+  showError(msg || 'Invalid or already-used token. Each token is single-use only.');
+}
+
+function onAnalysisDone(reportId, desktopScore, mobileScore) {
+  // Clear & visually mark the token as consumed
+  var inp = document.getElementById('token-input');
+  inp.value = '';
+  inp.placeholder = 'Token used — enter a new one for another analysis';
+  inp.style.borderColor = '#e2e8f0';
+  showReport(reportId, desktopScore, mobileScore);
 }
 
 // ── UI helpers ─────────────────────────────────────────
